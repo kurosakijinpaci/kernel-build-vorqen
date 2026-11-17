@@ -1,0 +1,1920 @@
+name: VORQEN Munch | xxKSU -52 + SUSFS 2.4.0 + NoMount 2.3.0 + fgetpriority
+# Nama yang tampil di tab Actions dan daftar workflow (hanya label, tidak mempengaruhi build).
+# run-name = judul tiap run, memuat tag xxKSU dan mode hook yang dipilih saat Run workflow.
+run-name: VORQEN Munch - xxKSU ${{ inputs.ksu_ref || 'v3.3.1-52' }} (${{ inputs.hook_mode || 'branch_link' }})
+
+# Basis: liyafe1997/kernel_xiaomi_sm8250_mod (branch android15-lineage22-mod), varian MIUI/HyperOS.
+# Resep build mengikuti build.sh tree tersebut (defconfig munch_defconfig, flag MIUI, patch dts panel).
+# Varian AOSP TIDAK dipakai: di HyperOS driver display-nya beda dan layar jadi hitam.
+#
+# Root: xxKSU (backslashxx/KernelSU) tag v3.3.1-52, dipasang dengan resep yang sama dengan build whyred:
+#   - clone + checkout tag (bukan raw setup.sh); bila tag hilang/dipindah, build berhenti dengan daftar tag terbaru
+#   - kernel/selinux + kernel/feature/selinux_hide diambil dari ujung master xxKSU (input ksu_selinux_master, sama dengan whyred),
+#     dengan gerbang "SELinux clean" (generation tracking). Langkah lama "selinux.h upstream tiann 730f644" DIHAPUS karena
+#     mengubah selinux.h sehingga patch 11 (di bawah) tidak lagi cocok konteksnya.
+#   - hook milik driver: branch_link (KSU_HACK_ARM64_BRANCH_LINK, default) atau syscall_table (KSU_TAMPER_SYSCALL_TABLE);
+#     hook sumber bawaan tree dimatikan (guard CONFIG_KSU dialihkan)
+#   - SUSFS sisi KernelSU: patch 11 KHUSUS xxKSU dari yapixel/xxksu_susfs_patch (SAMA dengan build whyred; input
+#     susfs_xxksu_patch_url, bisa dikunci ke hash commit). Pengganti patch midori01. 10_enable_susfs_for_ksu.patch (tiann/OriginSU)
+#     TIDAK dipakai: terbukti tidak cocok dengan xxKSU (tidak ada kernel/Kbuild, kernel/core/init.c).
+#     Sesudahnya hook sepolicy.c, glue filter prioritas (supercall 0x60030 + throne_tracker) dan penyelarasan v2.4.0 dipasang
+#     (semua idempotent: dilewati bila patch 11 sudah membawanya).
+#   - backport kallsyms_on_each_symbol() bila tree belum punya
+#   Rilis ini butuh manager UAPI 6: pakai APK dari rilis YANG SAMA https://github.com/backslashxx/KernelSU/releases/tag/v3.3.1-52
+#   Kode versi driver disamakan dengan kode versi manager lewat input ksu_version_code: auto (default) = dihitung dari jumlah commit
+#   repo dengan rumus build.gradle.kts manager (30000 + commit - offset; offset v3.3.1-52 = 92), official = angka bawaan penulis di
+#   kernel/Makefile (v3.3.1-52: driver 32731), atau isi angka sendiri.
+# NoMount: v2.3.0-720 (maxsteeel), built-in. Pasang juga metamodule NoMount v2.3.0 lewat manager setelah flash (driver dan modul berpasangan).
+# SUSFS bersifat opsional lewat input susfs_enable. 10 opsi SUSFS (SUS_PATH, SUS_MOUNT, SUS_KSTAT, SPOOF_UNAME, ENABLE_LOG,
+#   HIDE_KSU_SUSFS_SYMBOLS, SPOOF_CMDLINE_OR_BOOTCONFIG, OPEN_REDIRECT, SUS_MAP, PRIORITY_UID_FILTER) sama dengan build whyred;
+#   opsi ke-10 (filter uid prioritas, CMD 0x60030) native di patch Jack >= 38bbbd5, matikan lewat input susfs_priority_uid_filter.
+# fgetpriority (aerath-stuff): menyaring sys_getpriority/setpriority/ioprio_get/ioprio_set untuk UID aplikasi lain.
+#   Sekarang BUILT-IN (drivers/fgetpriority, CONFIG_FGETPRIORITY=y), persis seperti build whyred, di-pin ke commit be4ea47 (v0.0.4).
+#   Tidak ada lagi zip modul .ko terpisah. Matikan lewat input enable_fgetpriority.
+# AnyKernel3: anykernel.sh diisi otomatis (kernel.string "... by <akun GitHub pemicu>", device.name1=munch, device.name2=POCO F4).
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolchain:
+        description: "Toolchain: proton (bawaan tree), zyc (default, ZyCromerZ Clang 16.0.6), both (dua-duanya paralel)"
+        type: choice
+        options: [proton, zyc, both]
+        default: zyc
+      ksu_ref:
+        description: "Tag rilis xxKSU (backslashxx/KernelSU). Default v3.3.1-52. APK manager harus dari rilis yang sama."
+        type: string
+        default: "v3.3.1-52"
+      hook_mode:
+        description: "Mode hook xxKSU. branch_link (default, disarankan penulis untuk 4.19+) atau syscall_table."
+        type: choice
+        options: [branch_link, syscall_table]
+        default: branch_link
+      ksu_version_code:
+        description: "Kode versi driver xxKSU yang tampil di manager (Home > Version). auto (default) = samakan dengan kode versi manager rilis yang sama (dihitung dari jumlah commit repo, sama dengan rumus build.gradle.kts manager). official = pakai angka bawaan penulis di kernel/Makefile apa adanya (v3.3.1-52: driver 32731). Atau isi angka sendiri."
+        type: string
+        default: "auto"
+      build_user:
+        description: "Nama pembuat yang tampil di /proc/version dan uname -v (bagian sebelum @). Default kurosakiJin."
+        type: string
+        default: "kurosakiJin"
+      build_host:
+        description: "Nama host yang tampil di /proc/version dan uname -v (bagian sesudah @). Default bankai. Pakai huruf kecil, angka, titik, atau tanda hubung, tanpa spasi."
+        type: string
+        default: "bankai"
+      susfs_enable:
+        description: "Pasang SUSFS (patch kernel 4.19 v2.4.0 + sisi KernelSU patch 11 khusus xxKSU, sama dengan build whyred). Matikan untuk build tanpa SUSFS."
+        type: boolean
+        default: true
+      susfs_priority_uid_filter:
+        description: "Nyalakan CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER (filter uid pada getpriority/setpriority/ioprio, dipakai fitur hide_third_party_apps BRENE, CMD 0x60030). Default AKTIF. Matikan bila ingin tanpa hook di sys.c/ioprio.c."
+        type: boolean
+        default: true
+      debug_fs:
+        description: "Nyalakan CONFIG_DEBUG_FS (DEFAULT mati sesuai resep MIUI tree; tidak dibutuhkan KernelSU kprobes)"
+        type: boolean
+        default: false
+      ksu_selinux_master:
+        description: "Ambil folder kernel/selinux + kernel/feature/selinux_hide dari ujung master xxKSU (commit SELinux terbaru sesudah tag), sama dengan build whyred. Sisa driver tetap di tag. Matikan bila kompilasi gagal karena file SELinux master butuh perubahan lain di luar folder itu."
+        type: boolean
+        default: true
+      susfs_xxksu_patch_url:
+        description: "URL patch SUSFS sisi-KernelSU khusus xxKSU (Patch 11, yapixel/xxksu_susfs_patch; sama dengan build whyred). Ganti ke URL dengan hash commit untuk mengunci versi patch."
+        type: string
+        default: "https://raw.githubusercontent.com/yapixel/xxksu_susfs_patch/main/patches/xxksu/11_enable_susfs_for_ksu.patch"
+      enable_fgetpriority:
+        description: "Pasang fgetpriority (aerath-stuff) BUILT-IN di kernel (CONFIG_FGETPRIORITY=y), sama dengan build whyred. Sembunyikan hasil getpriority/setpriority/ioprio antar-aplikasi."
+        type: boolean
+        default: true
+      fgetpriority_ref:
+        description: "Commit/tag aerath-stuff/fgetpriority. Default = commit be4ea47 (v0.0.4, sama dengan whyred). Kosong = ujung branch default (terbaru)."
+        type: string
+        default: "be4ea47fa651c80a068e477d5a3627270b7bd683"
+      anykernel_devicecheck:
+        description: "Nyalakan pemeriksaan perangkat AnyKernel3 (do.devicecheck=1; zip menolak flash bila ro.product.device bukan munch/alioth-poco). Default MATI supaya ROM custom yang melaporkan nama perangkat lain tetap bisa flash. Banner nama kernel/perangkat tetap diisi."
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # dibutuhkan untuk membuat GitHub Release
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  KBUILD_BUILD_USER: ${{ inputs.build_user || 'kurosakiJin' }}
+  KBUILD_BUILD_HOST: ${{ inputs.build_host || 'bankai' }}
+  TZ: Asia/Jakarta
+  NOMOUNT_VERSION: v2.3.0-720
+  KERNEL_REPO: https://github.com/liyafe1997/kernel_xiaomi_sm8250_mod
+  KERNEL_BRANCH: android15-lineage22-mod
+  DEVICE: munch
+  # proton = proton-clang 20210522 (bawaan build.sh tree). zyc = ZyCromerZ Clang 16.0.6 (uji).
+  # Nama file asset zyc dicari otomatis lewat GitHub API: https://github.com/ZyCromerZ/Clang/releases
+  ZYC_TAG: "16.0.6-20260807-release"
+  # Tampilan versi kernel: 4.19.352-vorqen (label kosmetik; source asli 4.19.325)
+  KERNEL_SUBLEVEL: "352"
+  KERNEL_LOCALVERSION: "-vorqen"
+
+  # --- xxKSU (backslashxx/KernelSU), dipasang dengan clone + checkout tag langsung ---
+  KSU_REPO: https://github.com/backslashxx/KernelSU
+  KSU_REF: ${{ inputs.ksu_ref || 'v3.3.1-52' }}
+  # Hash commit tag v3.3.1-52 belum dicatat (kosong = tidak ada cadangan commit; bila tag hilang build berhenti dengan daftar tag).
+  # Isi hash penuh dari halaman rilis bila ingin cadangan saat tag dipindah/dihapus (repo ini sering force-push).
+  KSU_EXPECT_COMMIT: ""
+  KSU_EXPECT_REF: "v3.3.1-52"
+  KSU_EXPECT_UAPI: "6"
+  KSU_HOOK_MODE: ${{ inputs.hook_mode || 'branch_link' }}
+  # Mode kode versi driver: auto | official | angka. Hasil akhir ditulis step "Samakan kode versi" ke KSU_VERSION_FINAL.
+  KSU_VERSION_MODE: ${{ inputs.ksu_version_code || 'auto' }}
+  # Sisi KernelSU untuk SUSFS: Patch 11 khusus xxKSU (yapixel/xxksu_susfs_patch), SAMA dengan build whyred.
+  SUSFS_XXKSU_PATCH_URL: ${{ inputs.susfs_xxksu_patch_url || 'https://raw.githubusercontent.com/yapixel/xxksu_susfs_patch/main/patches/xxksu/11_enable_susfs_for_ksu.patch' }}
+  KSU_SELINUX_MASTER: ${{ inputs.ksu_selinux_master == false && 'false' || 'true' }}
+  AK_DEVICECHECK: ${{ inputs.anykernel_devicecheck == true && '1' || '0' }}
+  DEBUG_FS_ON: ${{ inputs.debug_fs == true && 'true' || 'false' }}
+
+  # fgetpriority (aerath-stuff), BUILT-IN seperti build whyred (drivers/fgetpriority, bool). FGP_REF kosong = ujung branch; isi hash untuk pin.
+  FGP_ENABLE: ${{ inputs.enable_fgetpriority == false && 'false' || 'true' }}
+  FGP_REPO: https://github.com/aerath-stuff/fgetpriority
+  FGP_REF: ${{ inputs.fgetpriority_ref }}
+  # SELinux enforcing bersih: matikan jalur SELinux disabled/boot-param.
+  SELINUX_HARDEN: "true"
+  # "false" = aturan sepolicy driver dipakai apa adanya (standar KernelSU: hanya domain su yang permissive).
+  KSU_SEPOLICY_NO_PERMISSIVE: "false"
+
+  # SUSFS: patch sisi kernel 4.19 v2.4.0 (non-GKI / de-inlined, NonGKI_Kernel_Build_2nd). Sisi KernelSU dipasang oleh step
+  # "Pasang sisi KernelSU untuk SUSFS" (patch 11 khusus xxKSU, lihat SUSFS_XXKSU_PATCH_URL).
+  SUSFS_ENABLE: ${{ inputs.susfs_enable == false && 'false' || 'true' }}
+  SUSFS_PATCH_REPO: https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd
+  # Patch kernel 4.19 v2.4.0 di-pin ke commit 4b0766b (Patches/Patch/susfs_patch_to_4.19.patch, repo Jack).
+  # Kosongkan SUSFS_PATCH_COMMIT untuk memakai ujung (HEAD) repo Jack. Filter prioritas native sudah ada sejak 38bbbd5.
+  SUSFS_PATCH_COMMIT: 4b0766bdf5d568b695dfbb19994788f14c636f2b
+  # sha256 patch v2.4.0 yang kamu unggah (susfs_patch_to_4_19__2_.patch). Beda = hanya peringatan (patch Jack berubah lagi).
+  SUSFS_PATCH_SHA256_EXPECT: "eee7b1bbab41d97b3d16ffb432a3efd159aba32577154685a2f9a5ba597288b4"
+  SUSFS_PATCH_PATH: Patches/Patch/susfs_patch_to_4.19.patch
+  # Tree sudah membawa SUSFS lama (v1.5.7: fs/susfs.c, sus_su.c) yang bentrok dengan v2.x. Dibuang lewat git revert.
+  # Tetap dijalankan walau SUSFS baru dimatikan (jalur terbukti).
+  SUSFS_REMOVE_LEGACY: "true"
+  # Log kernel SUSFS (CONFIG_KSU_SUSFS_ENABLE_LOG) DINYALAKAN: SUSFS menulis log ke dmesg (`dmesg | grep -i susfs`).
+  # Catatan: log ikut jalan di jalur hot (stat/open/mount/maps) dan sebelumnya dimatikan karena memicu stutter di game.
+  # Kalau stutter muncul lagi, kembalikan ke "false".
+  SUSFS_KERNEL_LOG: "true"
+  # Filter uid prioritas (patch Jack + guard Kconfig ala susfs4ksu upstream) = opsi SUSFS ke-10. Bisa dimatikan lewat input susfs_priority_uid_filter.
+  SUSFS_PRIORITY_UID_FILTER: ${{ inputs.susfs_priority_uid_filter == false && 'false' || 'true' }}
+
+  # Jaringan (5G + WiFi): TCP bbr, power-save cfg80211 mati, opsi netfilter tambahan.
+  NET_TUNE: "true"
+  # IPC_LOGGING dimatikan demi RAM. Set "false" bila 5G/WiFi putus-putus dan perlu log Qualcomm.
+  IPC_LOGGING_OFF: "true"
+  # Default MM: swappiness 60 (default upstream) dan lru_gen min_ttl 1000 ms (rekomendasi upstream untuk beban interaktif).
+  # Hanya mengubah bila polanya ditemukan di source; tidak ketemu = dilewati dengan peringatan.
+  MM_TUNE: "true"
+  MM_TUNE_SWAPPINESS: "60"
+  MM_TUNE_LRU_GEN_MIN_TTL_MS: "1000"
+  # Governor CPU default saat boot = schedutil (kebersihan saja; power-HAL menimpanya setelah boot).
+  # Tabel OPP CPU/GPU dan governor GPU SENGAJA tidak disentuh (butuh profiling di perangkat).
+  CPU_GOV_DEFAULT_SCHEDUTIL: "true"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04   # proton-clang 2021 + host gcc 11: sama dengan lingkungan resep build.sh tree
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ${{ fromJSON(inputs.toolchain == 'both' && '["proton","zyc"]' || format('["{0}"]', inputs.toolchain)) }}
+    env:
+      TOOLCHAIN: ${{ matrix.toolchain }}
+    steps:
+      - name: Cleanup disk
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git curl wget bison flex zip unzip bc cpio rsync \
+            libssl-dev libelf-dev lz4 zstd libarchive-tools patchelf python-is-python3 \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+          python --version
+
+      - name: Setup toolchain (proton-clang 20210522 bawaan tree)
+        if: matrix.toolchain == 'proton'
+        run: |
+          set -eo pipefail
+          mkdir -p "$HOME/proton-clang"
+          cd "$HOME/proton-clang"
+          wget -q https://github.com/kdrag0n/proton-clang/archive/refs/tags/20210522.zip
+          unzip -q 20210522.zip
+          rm -f 20210522.zip
+          TC="$HOME/proton-clang/proton-clang-20210522/bin"
+          test -x "$TC/clang" || { echo "::error::clang tidak ditemukan di $TC"; exit 1; }
+          echo "$TC" >> "$GITHUB_PATH"
+          export PATH="$TC:$PATH"
+          clang --version | head -1
+          for t in aarch64-linux-gnu-ld arm-linux-gnueabi-ld; do
+            if command -v "$t" >/dev/null 2>&1; then "$t" --version | head -1
+            else echo "::warning::$t tidak ada di toolchain ini (dipasang dari paket binutils-* apt)"; fi
+          done
+
+      - name: Setup toolchain (ZyCromerZ Clang 16.0.6)
+        if: matrix.toolchain == 'zyc'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eo pipefail
+          mkdir -p "$HOME/zyc-clang"
+          cd "$HOME/zyc-clang"
+          echo "== Asset rilis ${ZYC_TAG} =="
+          gh api "repos/ZyCromerZ/Clang/releases/tags/${ZYC_TAG}" --jq '.assets[].name'
+          ASSET="$(gh api "repos/ZyCromerZ/Clang/releases/tags/${ZYC_TAG}" --jq '.assets[].name' | grep -E '^Clang-.*\.tar\.(gz|xz|zst)$' | head -1 || true)"
+          if [ -z "$ASSET" ]; then
+            echo "::error::Tidak ada asset Clang-*.tar.* di rilis ${ZYC_TAG} (lihat daftar di atas)"
+            exit 1
+          fi
+          echo "Mengunduh: $ASSET"
+          gh release download "$ZYC_TAG" --repo ZyCromerZ/Clang --pattern "$ASSET"
+          mkdir -p extracted
+          tar -xf "$ASSET" -C extracted
+          rm -f "$ASSET"
+          CLANG_BIN="$(find extracted -maxdepth 3 \( -type f -o -type l \) -name clang -path '*/bin/clang' | head -1 || true)"
+          test -n "$CLANG_BIN" || { echo "::error::bin/clang tidak ditemukan setelah ekstrak"; ls extracted; exit 1; }
+          TC="$(cd "$(dirname "$CLANG_BIN")" && pwd)"
+          echo "$TC" >> "$GITHUB_PATH"
+          export PATH="$TC:$PATH"
+          clang --version | head -1
+          for t in aarch64-linux-gnu-ld arm-linux-gnueabi-ld ld.lld llvm-ar; do
+            if command -v "$t" >/dev/null 2>&1; then "$t" --version | head -1
+            else echo "::warning::$t tidak ada di PATH"; fi
+          done
+
+      - name: Clone kernel source
+        run: |
+          set -eo pipefail
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel_source
+          git -C kernel_source log -1 --format='Source: %h %s'
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) ' kernel_source/Makefile
+          test -f "kernel_source/arch/arm64/configs/${DEVICE}_defconfig"
+          test -d kernel_source/techpack/display
+
+      - name: Buang SUSFS lama bawaan tree (jika ada)
+        if: env.SUSFS_REMOVE_LEGACY == 'true'
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          if [ ! -f fs/susfs.c ]; then
+            echo "Tree tidak membawa SUSFS lama, tidak ada yang dibuang"
+            exit 0
+          fi
+          echo "== SUSFS lama terdeteksi di tree =="
+          ls fs/susfs.c fs/sus_su.c include/linux/susfs*.h include/linux/sus_su*.h 2>/dev/null || true
+          git fetch -q --unshallow 2>/dev/null || git fetch -q --depth=100000
+          PATHS="fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h fs/sus_su.c include/linux/sus_su.h"
+          COMMITS="$(git log --no-merges --format=%H -- $PATHS)"
+          echo "== Commit yang menyentuh file SUSFS (terbaru -> terlama) =="
+          git log --no-merges --format='%h %ad %s' --date=short -- $PATHS
+          if [ -z "$COMMITS" ]; then
+            echo "::error::Tidak ada commit yang bisa di-revert. Pakai tree/commit tanpa SUSFS, atau buang manual."
+            exit 1
+          fi
+          git config user.name ci
+          git config user.email ci@local
+          for c in $COMMITS; do
+            if ! git revert --no-commit "$c"; then
+              CONFLICTS="$(git diff --name-only --diff-filter=U)"
+              echo "== Konflik saat revert $c =="
+              echo "$CONFLICTS"
+              # Konflik di drivers/Kconfig & drivers/Makefile aman: pakai versi tree saat ini
+              # (step Setup KernelSU menambahkan entri kernelsu lagi secara idempotent).
+              BAD="$(echo "$CONFLICTS" | grep -v -E '^drivers/(Kconfig|Makefile)$' || true)"
+              if [ -n "$BAD" ]; then
+                git revert --abort || true
+                git reset -q --hard HEAD
+                echo "::error::Revert $c konflik di file penting: $BAD. Pakai tree tanpa SUSFS atau buang manual."
+                exit 1
+              fi
+              for f in $CONFLICTS; do
+                git checkout --ours -- "$f"
+                git add "$f"
+              done
+              git revert --quit
+            fi
+          done
+          # Sisa opsi SUSFS lama di defconfig (jika ada) dibuang; opsi yang benar diset ulang di step build.
+          sed -i '/^CONFIG_KSU_SUSFS/d' "arch/arm64/configs/${DEVICE}_defconfig" || true
+          if [ -e fs/susfs.c ] || grep -rqs 'CONFIG_KSU_SUSFS' fs include kernel; then
+            echo "== Sisa referensi SUSFS lama =="
+            grep -rn 'CONFIG_KSU_SUSFS' fs include kernel | head -40 || true
+            echo "::error::Masih ada sisa SUSFS lama setelah revert."
+            exit 1
+          fi
+          echo "::notice::SUSFS lama dibuang"
+
+      - name: Set nama versi kernel (4.19.352-vorqen)
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          echo "== Versi di Makefile SEBELUM =="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) ' Makefile
+          sed -i "s/^SUBLEVEL = .*/SUBLEVEL = ${KERNEL_SUBLEVEL}/" Makefile
+          echo "== Versi di Makefile SESUDAH =="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) ' Makefile
+
+          # SUBLEVEL > 255 harus di-clamp pada LINUX_VERSION_CODE agar tidak meluap ke PATCHLEVEL.
+          # Source asli sudah di .325 (>255), jadi clamp ini seharusnya sudah ada. Cek saja.
+          grep -n -B1 -A4 'LINUX_VERSION_CODE' Makefile | head -20 || true
+          if ! grep -n -A4 'LINUX_VERSION_CODE' Makefile | grep -q '255'; then
+            echo "::warning::Clamp 255 pada LINUX_VERSION_CODE tidak terdeteksi, periksa Makefile"
+          fi
+
+          # .scmversion kosong: mencegah akhiran '+' / hash git otomatis dari setlocalversion,
+          # sehingga nama versi persis seperti yang diinginkan. Hapus baris ini jika ingin akhiran '+'.
+          : > .scmversion
+
+
+      - name: Setup KernelSU (xxKSU backslashxx, tag rilis)
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          case "$KSU_HOOK_MODE" in
+            branch_link|syscall_table) ;;
+            *) echo "::error::KSU_HOOK_MODE harus branch_link atau syscall_table"; exit 1 ;;
+          esac
+
+          # Clone langsung + checkout tag (tanpa curl raw setup.sh yang bisa kena 404 di tag baru).
+          # Clone penuh (bukan --depth=1) supaya angka versi KSU dari git rev-list benar.
+          # Lalu langkah yang sama dengan setup.sh: symlink drivers/kernelsu dan entri di drivers/Makefile + drivers/Kconfig.
+          rm -rf KernelSU
+          git clone -q "$KSU_REPO" KernelSU
+          git -C KernelSU fetch -q --tags --force || true
+          # Tag bisa hilang/dipindah (repo ini sering di-force-push). Urutan: tag -> commit pin (KSU_EXPECT_COMMIT) -> gagal + daftar tag.
+          KSU_FALLBACK_SHA=""
+          if git -C KernelSU rev-parse -q --verify "refs/tags/${KSU_REF}^{commit}" >/dev/null; then
+            git -C KernelSU checkout -q "refs/tags/${KSU_REF}"
+          elif [ -n "$KSU_EXPECT_COMMIT" ] && [ "$KSU_REF" = "$KSU_EXPECT_REF" ]; then
+            echo "::warning::Tag ${KSU_REF} tidak ada di ${KSU_REPO}; memakai commit yang di-pin (${KSU_EXPECT_COMMIT:0:8}) dari rilis yang sama"
+            git -C KernelSU cat-file -e "${KSU_EXPECT_COMMIT}^{commit}" 2>/dev/null \
+              || git -C KernelSU fetch -q origin "$KSU_EXPECT_COMMIT" \
+              || { echo "== Tag terbaru di repo =="; git -C KernelSU tag --sort=-creatordate | sed -n '1,25p'
+                   echo "::error::Tag ${KSU_REF} hilang dan commit ${KSU_EXPECT_COMMIT:0:8} tidak bisa diambil (kemungkinan force-push). Isi input ksu_ref dengan tag yang ada di daftar di atas, lalu cocokkan APK manager dengan rilis itu."; exit 1; }
+            git -C KernelSU checkout -q "$KSU_EXPECT_COMMIT"
+            KSU_FALLBACK_SHA="$KSU_EXPECT_COMMIT"
+          else
+            echo "== Tag terbaru di repo =="; git -C KernelSU tag --sort=-creatordate | sed -n '1,25p'
+            echo "::error::Tag ${KSU_REF} tidak ada di repo KernelSU. Pilih salah satu tag dari daftar di atas untuk input ksu_ref."; exit 1
+          fi
+          test -d KernelSU/kernel
+          ln -sfn ../KernelSU/kernel drivers/kernelsu
+          grep -q 'kernelsu' drivers/Makefile \
+            || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig \
+            || sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          # Hasil checkout dicek sendiri. Satu commit bisa membawa beberapa tag, jadi bandingkan COMMIT tag yang diminta dengan HEAD.
+          KSU_COMMIT_NOW="$(git -C KernelSU rev-parse HEAD)"
+          KSU_TAGS_NOW="$(git -C KernelSU tag --points-at HEAD | tr '\n' ' ')"
+          KSU_REF_COMMIT="${KSU_FALLBACK_SHA:-$(git -C KernelSU rev-parse -q --verify "refs/tags/${KSU_REF}^{commit}" || true)}"
+          echo "== xxKSU terpasang: tag di HEAD='${KSU_TAGS_NOW}' commit=${KSU_COMMIT_NOW} =="
+          git -C KernelSU log -1 --format='%h %s'
+          [ -n "$KSU_REF_COMMIT" ] || { echo "::error::Tag ${KSU_REF} tidak ada di repo KernelSU"; exit 1; }
+          [ "$KSU_REF_COMMIT" = "$KSU_COMMIT_NOW" ] \
+            || { echo "::error::Checkout tag ${KSU_REF} gagal (HEAD ${KSU_COMMIT_NOW}, tag ${KSU_REF_COMMIT})"; exit 1; }
+          if [ -n "$KSU_EXPECT_COMMIT" ] && [ "$KSU_REF" = "$KSU_EXPECT_REF" ]; then
+            case "$KSU_COMMIT_NOW" in
+              "$KSU_EXPECT_COMMIT"*) ;;
+              *) echo "::warning::Commit tag ${KSU_REF} (${KSU_COMMIT_NOW}) berbeda dari yang diharapkan (${KSU_EXPECT_COMMIT}); tag mungkin dipindah" ;;
+            esac
+          fi
+          echo "KSU_COMMIT=${KSU_COMMIT_NOW}" >> "$GITHUB_ENV"
+
+          test -L drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
+          grep -q 'kernelsu' drivers/Makefile
+
+          echo "== Opsi Kconfig xxKSU =="
+          grep -h -E '^[[:space:]]*config ' drivers/kernelsu/Kconfig || true
+          echo "== Versi & manager yang ditanam di driver =="
+          grep -n -E 'KSU_VERSION=|KSU_PACKAGE_NAME :=' drivers/kernelsu/Makefile || true
+          UAPI_LINE="$(grep -rhn 'UAPI_VERSION' drivers/kernelsu/include/uapi KernelSU/uapi 2>/dev/null | head -3 || true)"
+          echo "${UAPI_LINE:-(UAPI_VERSION tidak ditemukan)}"
+          UAPI_NOW="$(printf '%s\n' "$UAPI_LINE" | grep -oE '[0-9]+' | tail -1 || true)"
+          if [ -n "$UAPI_NOW" ] && [ -z "$KSU_EXPECT_UAPI" ]; then
+            echo "::notice::UAPI driver = ${UAPI_NOW}; APK manager harus dari rilis ${KSU_REF}"
+          elif [ -n "$UAPI_NOW" ] && [ "$KSU_REF" = "$KSU_EXPECT_REF" ] && [ "$UAPI_NOW" != "$KSU_EXPECT_UAPI" ]; then
+            echo "::warning::UAPI driver (${UAPI_NOW}) berbeda dari yang tertulis di catatan rilis (${KSU_EXPECT_UAPI}); pastikan APK manager dari rilis ${KSU_REF}"
+          fi
+          echo "::notice::xxKSU ${KSU_REF} (commit ${KSU_COMMIT_NOW:0:8}), mode hook: ${KSU_HOOK_MODE}. Manager: APK dari halaman rilis tag yang sama."
+          # Simbol hook dipilih sesuai mode; wajib ada di Kconfig driver ini.
+          if [ "$KSU_HOOK_MODE" = "syscall_table" ]; then HOOK_SYM=KSU_TAMPER_SYSCALL_TABLE; else HOOK_SYM=KSU_HACK_ARM64_BRANCH_LINK; fi
+          if ! grep -qE "^[[:space:]]*config[[:space:]]+${HOOK_SYM}([[:space:]]|$)" drivers/kernelsu/Kconfig; then
+            echo "== Kconfig (diagnosis) =="; sed -n '1,140p' drivers/kernelsu/Kconfig
+            echo "::error::${HOOK_SYM} tidak ada di Kconfig xxKSU ${KSU_REF} (mode hook ${KSU_HOOK_MODE}). Pilih mode lain atau kirim daftar opsi di atas."
+            exit 1
+          fi
+          echo "KSU_HOOK_SYM=${HOOK_SYM}" >> "$GITHUB_ENV"
+          echo "KSU_DIR=$(pwd)/KernelSU" >> "$GITHUB_ENV"
+
+          # ---------------------------------------------------------------------------
+          # Tree liyafe1997 membawa hook sumber bawaan (gaya KernelSU lama) di fs/, kernel/, drivers/, dst.
+          # xxKSU memasang hook sendiri (LSM + branch-link / syscall-table), jadi hook lama tree harus tidak ikut dikompilasi:
+          # semua guard CONFIG_KSU di file C/H milik tree dialihkan. git grep hanya memeriksa file milik tree
+          # (KernelSU/ dan NoMount/ belum di-track, dan symlink tidak diikuti).
+          # ---------------------------------------------------------------------------
+          TREE_HOOK_FILES="$(git grep -lE 'CONFIG_KSU|ksu_' -- '*.c' '*.h' || true)"
+          echo "== File tree yang menyebut KSU =="
+          echo "${TREE_HOOK_FILES:-(tidak ada)}"
+          if [ -n "$TREE_HOOK_FILES" ]; then
+            echo "== Baris KSU di file tree (SEBELUM) =="
+            git grep -nE 'CONFIG_KSU|ksu_' -- $TREE_HOOK_FILES | head -80 || true
+            perl -pi -e 's/^(\s*#\s*(?:if|ifdef|ifndef|elif)\b.*?)\bCONFIG_KSU\b/$1CONFIG_KSU_TREE_HOOK_DISABLED/' $TREE_HOOK_FILES
+            echo "== Guard yang dialihkan =="
+            git grep -c 'CONFIG_KSU_TREE_HOOK_DISABLED' -- $TREE_HOOK_FILES || true
+          fi
+          echo "== Sisa referensi KSU di file tree (SESUDAH, di luar guard yang dialihkan) =="
+          git grep -nE 'CONFIG_KSU\b|ksu_' -- '*.c' '*.h' | grep -v 'CONFIG_KSU_TREE_HOOK_DISABLED' | head -60 || true
+
+          echo "::notice::xxKSU ${KSU_REF} @ ${KSU_COMMIT:0:8}, mode hook: ${KSU_HOOK_MODE}"
+
+      - name: SELinux terbaru dari master xxKSU (kernel/selinux + selinux_hide, sama dengan whyred)
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          # Dipindah dari build whyred. Menggantikan langkah lama "selinux.h upstream tiann 730f644" (selinux.h hasil langkah itu tidak
+          # cocok dengan konteks patch 11 xxKSU). kernel/selinux + selinux_hide diambil dari master xxKSU, sisanya tetap di tag.
+          KSU_LABEL="$KSU_REF"
+          BASE="$(git -C KernelSU rev-parse HEAD)"
+          # --- SELinux terbaru: ambil kernel/selinux dari ujung master (hanya folder itu; sisanya tetap di tag) ---
+          SEL_NOTE="tag ${KSU_LABEL}"
+          # "SELinux clean" = policy yang dimodifikasi KernelSU menaikkan nomor urut (seqno/latest_granting) seperti load policy
+          # asli, bukan reset_avc_cache(0) yang membuat seqno statis dan mudah terdeteksi sebagai policy "dirty"
+          # (xxKSU 43aceaee / tiann #3964). Dipakai untuk menolak kernel/selinux yang tidak memenuhi syarat itu.
+          sel_is_clean() {
+            [ "$(grep -cE 'reset_avc_cache\((get_latest_granting_inc\(\)|pol->latest_granting)\)' "$1")" -ge 2 ] \
+              && ! grep -q 'reset_avc_cache(0)' "$1"
+          }
+          # Path kedua yang disinkronkan bersamaan: kernel/feature/selinux_hide.* (implementasi "selinux hide"
+          # sesungguhnya -- kernel/selinux cuma soal generation tracking/seqno, bukan penyamaran ke app/root).
+          # xxKSU aktif merevisi file ini di master (mis. tiann#3647 "spoof status page and avd seqno") sesudah
+          # tag rilis dibuat, jadi disatukan di sini supaya ikut ter-update tiap build, tidak perlu ganti tag manual.
+          SELHIDE_PATHS="kernel/feature/selinux_hide.c kernel/feature/selinux_hide.h"
+          # Sanity check murah (bukan pengganti kompilasi): pastikan ke-4 hook penyamaran yang dipakai xxKSU masih
+          # ada namanya di file ini. Kalau refactor besar mengganti nama fungsi-fungsi ini, anggap tidak "clean"
+          # untuk dipakai parsial (daripada bisa gagal link/compile dengan file lain yang masih versi tag).
+          selhide_is_clean() {
+            for fn in ksu_hide_setprocattr_inline ksu_hide_setxattr_inline ksu_selinux_transaction_write ksu_sel_open_handle_status ksu_selinux_hide_init; do
+              grep -q "$fn" "$1" || return 1
+            done
+            return 0
+          }
+          if [ "$KSU_SELINUX_MASTER" = "true" ]; then
+            git -C KernelSU fetch -q origin master
+            MASTER="$(git -C KernelSU rev-parse origin/master)"
+            echo "== Commit master (${MASTER:0:8}) yang menyentuh kernel/selinux + selinux_hide sejak ${KSU_LABEL} =="
+            git -C KernelSU log --format='%h %ad %s' --date=short "${BASE}..${MASTER}" -- kernel/selinux $SELHIDE_PATHS | head -25 || true
+            if git -C KernelSU diff --quiet "$BASE" "$MASTER" -- kernel/selinux $SELHIDE_PATHS; then
+              echo "::notice::kernel/selinux + selinux_hide di master identik dengan ${KSU_LABEL}: tidak ada perubahan baru"
+              SEL_NOTE="tag ${KSU_LABEL} (master identik)"
+            else
+              git -C KernelSU diff --stat "$BASE" "$MASTER" -- kernel/selinux $SELHIDE_PATHS
+              # Diambil SEKALIGUS (bukan terpisah): selinux_hide.c memakai backup_sepolicy/helper dari kernel/selinux,
+              # jadi keduanya harus dari sumber yang sama supaya tidak hilang simbol saat kompilasi.
+              git -C KernelSU checkout "$MASTER" -- kernel/selinux $SELHIDE_PATHS
+              SEL_NOTE="kernel/selinux + selinux_hide dari master @ ${MASTER:0:8}"
+              echo "::notice::kernel/selinux + selinux_hide diambil dari master @ ${MASTER:0:8}"
+              BAD=""
+              sel_is_clean KernelSU/kernel/selinux/rules.c || BAD="rules.c tidak clean (generation tracking hilang)"
+              [ -z "$BAD" ] && { selhide_is_clean KernelSU/kernel/feature/selinux_hide.c || BAD="selinux_hide.c kehilangan hook inti"; }
+              if [ -n "$BAD" ]; then
+                echo "::warning::master @ ${MASTER:0:8} ditolak ($BAD): kembali ke versi tag ${KSU_LABEL} untuk kernel/selinux + selinux_hide"
+                git -C KernelSU rm -rfq -- kernel/selinux $SELHIDE_PATHS
+                git -C KernelSU checkout "$BASE" -- kernel/selinux $SELHIDE_PATHS
+                SEL_NOTE="tag ${KSU_LABEL} (master @ ${MASTER:0:8} ditolak: $BAD)"
+              fi
+            fi
+          fi
+          # Gerbang akhir: apa pun sumbernya, kernel/selinux yang akan dibangun harus clean (gagal cepat sebelum build 30 menit).
+          sel_is_clean KernelSU/kernel/selinux/rules.c \
+            || { echo "::error::kernel/selinux xxKSU ${KSU_LABEL} tidak memuat generation tracking policy (seqno statis => policy terlihat dirty). Pakai ksu_ref yang lebih baru (>= v3.3.1-50)."; exit 1; }
+          selhide_is_clean KernelSU/kernel/feature/selinux_hide.c \
+            || { echo "::error::kernel/feature/selinux_hide.c xxKSU ${KSU_LABEL} kehilangan hook inti (my_write_context/my_write_access/initialize_fake_status)."; exit 1; }
+          echo "::notice::SELinux clean: generation tracking + selinux_hide ada (${SEL_NOTE})"
+          echo "KSU_SEL_NOTE=${SEL_NOTE}" >> "$GITHUB_ENV"
+          echo "KSU_LABEL=${KSU_LABEL}" >> "$GITHUB_ENV"
+      - name: Pasang sisi KernelSU untuk SUSFS (patch 11 khusus xxKSU, sama dengan whyred)
+        if: ${{ env.SUSFS_ENABLE == 'true' }}
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          KK=KernelSU/kernel/Kconfig
+          GLUE=no
+          # Patch SUSFS sisi-KernelSU KHUSUS xxKSU (backslashxx/KernelSU): yapixel/xxksu_susfs_patch, "Patch 11" (sama dengan build whyred).
+          # 10_enable_susfs_for_ksu.patch (tiann/OriginSU, Kbuild multi-berkas) tidak cocok dengan xxKSU (satu unit ksu.o) dan tidak dipakai.
+          XURL="$SUSFS_XXKSU_PATCH_URL"
+          XP=/tmp/11_enable_susfs_for_xxksu.patch
+          rm -f "$XP"
+          for n in 1 2 3 4; do
+            curl -fsSL --retry 3 --connect-timeout 20 -o "$XP" "$XURL" && break
+            echo "::warning::unduh patch xxKSU percobaan $n/4 gagal: $XURL"; rm -f "$XP"; sleep $((n*10))
+          done
+          if [ -s "$XP" ]; then
+            echo "Patch xxKSU: $XURL ($(wc -l < "$XP") baris, $(grep -c '^diff --git' "$XP") berkas, sha256 $(sha256sum "$XP" | cut -c1-16))"
+            grep -q 'KernelSU - SUSFS' "$XP" || { echo "::error::berkas yang diunduh bukan patch SUSFS untuk xxKSU"; head -5 "$XP"; exit 1; }
+          fi
+          if grep -qE '^[[:space:]]*config[[:space:]]+KSU_SUSFS[[:space:]]*$' "$KK"; then
+            GLUE=bawaan
+            echo "::notice::xxKSU ${KSU_REF} sudah punya opsi KSU_SUSFS di Kconfig-nya"
+          elif [ -s "$XP" ] && git -C KernelSU apply --check "$XP" 2>/tmp/ksu-apply.err; then
+            git -C KernelSU apply --whitespace=nowarn "$XP"
+            GLUE=patch-xxksu
+            echo "::notice::Patch SUSFS khusus xxKSU terpasang ke xxKSU ${KSU_REF}"
+          elif [ -s "$XP" ] && patch -p1 -d KernelSU --forward --dry-run -F3 < "$XP" >/tmp/ksu-patch-dry.log 2>&1; then
+            echo "== git apply --check gagal; patch -F3 dry-run bersih, diterapkan =="
+            head -20 /tmp/ksu-apply.err 2>/dev/null || true
+            patch -p1 -d KernelSU --forward --no-backup-if-mismatch -F3 < "$XP" | tail -30
+            find KernelSU -name '*.orig' -delete
+            GLUE=patch-xxksu
+            echo "::notice::Patch SUSFS khusus xxKSU terpasang (dengan fuzz) ke xxKSU ${KSU_REF}"
+          else
+            echo "== Sisi-KernelSU SUSFS TIDAK bisa dipasang ke xxKSU ${KSU_REF} =="
+            [ -s "$XP" ] || echo "(patch xxKSU tidak berhasil diunduh dari ${XURL})"
+            head -30 /tmp/ksu-apply.err 2>/dev/null || true
+            if [ -s "$XP" ]; then
+              echo "== patch -F3 dry-run patch xxKSU =="; head -40 /tmp/ksu-patch-dry.log 2>/dev/null || true
+              echo "== Berkas yang dituju patch xxKSU tetapi tidak ada di xxKSU =="
+              grep '^diff --git' "$XP" | awk '{print $3}' | sed 's#^a/##' | while read -r f; do
+                [ -e "KernelSU/$f" ] || echo "  tidak ada: $f"
+              done
+            fi
+            echo "== Isi KernelSU/kernel dan gaya build xxKSU =="
+            ls KernelSU/kernel | head -40
+            grep -nE 'obj-|ksu\.o|kernelsu-objs' KernelSU/kernel/Makefile 2>/dev/null | head -10 || true
+            echo "::error::Sisi-KernelSU SUSFS tidak bisa dipasang ke xxKSU ${KSU_REF} (patch 11 tidak cocok dengan tag ini; lihat diagnostik di atas). Pilihan: (1) isi input susfs_xxksu_patch_url dengan versi patch 11 yang cocok, (2) pakai tag xxKSU yang masih cocok (mis. v3.3.1-51), atau (3) matikan susfs_enable."
+            exit 1
+          fi
+          # Gerbang: tanpa sisi SUSFS di driver, fs/susfs.c gagal di-link dan CONFIG_KSU_SUSFS* tidak pernah ada.
+          grep -rqs 'susfs_is_current_ksu_domain' KernelSU/kernel && grep -qs 'KSU_SUSFS' KernelSU/kernel/Kconfig \
+            || { echo "::error::xxKSU ${KSU_REF} + patch 11 belum membawa sisi SUSFS (Kconfig KSU_SUSFS / susfs_is_current_ksu_domain tidak ada)"; exit 1; }
+          echo "SUSFS_GLUE=${GLUE}" >> "$GITHUB_ENV"
+          echo "::notice::SUSFS sisi-KernelSU: ${GLUE}"
+      - name: Lengkapi hook SELinux SUSFS (sepolicy.c, bagian patch 10 yang tidak ada di patch 11)
+        if: ${{ env.SUSFS_ENABLE == 'true' }}
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          # Patch 11 (xxKSU) hanya memuat rules.c/selinux.c/selinux.h. Patch 10 (tiann) juga memasang hook di
+          # kernel/selinux/sepolicy.c: susfs_add_sus_avd_allowed_by_type() dan susfs_add_sus_type().
+          # Tanpa hook itu SUS_TYPE / SUS_AVD_ALLOWED di susfs.c tidak pernah terisi.
+          F=drivers/kernelsu/selinux/sepolicy.c
+          [ -f "$F" ] || F=KernelSU/kernel/selinux/sepolicy.c
+          [ -f "$F" ] || { echo "::error::sepolicy.c tidak ditemukan"; exit 1; }
+          cat > "$RUNNER_TEMP/susfs_sepolicy_fixup.py" <<'PY'
+          #!/usr/bin/env python3
+          # Melengkapi hunk SELinux patch 10 (tiann) yang TIDAK ada di patch 11 (xxKSU): hook SUSFS di kernel/selinux/sepolicy.c
+          # (susfs_add_sus_avd_allowed_by_type di add_rule_raw, susfs_add_sus_type di add_type). Idempoten, gagal keras bila anchor hilang.
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding="utf-8").read()
+          if "susfs_add_sus_type" in s:
+              print("[skip] sepolicy.c sudah berisi hook SUSFS"); sys.exit(0)
+
+          def once(s, old, new, label):
+              if s.count(old) != 1:
+                  print(f"::error::anchor '{label}' ditemukan {s.count(old)}x (harus 1x) di {p}"); sys.exit(1)
+              return s.replace(old, new)
+
+          s = once(s, "#define KSU_SUPPORT_ADD_TYPE\n",
+           "#define KSU_SUPPORT_ADD_TYPE\n\n#ifdef CONFIG_KSU_SUSFS\n"
+           "extern int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u16 type, u32 orig_avd_allowed);\n"
+           "extern int susfs_add_sus_type(const char *secctx, u32 type_value);\n#endif // #ifdef CONFIG_KSU_SUSFS\n", "define")
+
+          # 1) add_rule_raw: sebelum node->datum.u.data diubah (nilai asli avd)
+          s = once(s, "\t\tif (invert) {\n\t\t\tif (perm)\n",
+           "#ifdef CONFIG_KSU_SUSFS\n\t\tsusfs_add_sus_avd_allowed_by_type(src->value, tgt->value, cls->value, node->datum.u.data);\n"
+           "#endif // #ifdef CONFIG_KSU_SUSFS\n\n\t\tif (invert) {\n\t\t\tif (perm)\n", "add_rule_raw")
+
+          # 2) add_type: bungkus (definisi asli diganti nama, wrapper memanggil hook setelah sukses)
+          OLD = "static bool add_type(struct policydb *db, const char *type_name, bool attr)\n{\n"
+          NEW = ("static bool ksu_add_type_orig(struct policydb *db, const char *type_name, bool attr);\n"
+                 "static bool add_type(struct policydb *db, const char *type_name, bool attr)\n{\n"
+                 "#ifdef CONFIG_KSU_SUSFS\n\tbool existed = symtab_search(&db->p_types, type_name) != NULL;\n#endif\n"
+                 "\tbool ok = ksu_add_type_orig(db, type_name, attr);\n"
+                 "#ifdef CONFIG_KSU_SUSFS\n\tif (ok && !existed) {\n"
+                 "\t\tstruct type_datum *t = symtab_search(&db->p_types, type_name);\n"
+                 "\t\tif (t)\n\t\t\tsusfs_add_sus_type(type_name, t->value);\n\t}\n#endif // #ifdef CONFIG_KSU_SUSFS\n"
+                 "\treturn ok;\n}\n\n"
+                 "static bool ksu_add_type_orig(struct policydb *db, const char *type_name, bool attr)\n{\n")
+          s = once(s, OLD, NEW, "add_type")
+          open(p, "w", encoding="utf-8").write(s)
+          print("[ok] hook SUSFS dipasang di", p)
+          PY
+          python3 -I "$RUNNER_TEMP/susfs_sepolicy_fixup.py" "$F"
+          grep -n "susfs_add_sus_type\|susfs_add_sus_avd_allowed_by_type" "$F"
+
+      - name: Lengkapi glue filter prioritas SUSFS (supercall 0x60030 + renew di throne_tracker)
+        if: ${{ env.SUSFS_ENABLE == 'true' }}
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          # Dipertahankan dari build munch sebelumnya (diperlukan fitur hide_third_party_apps BRENE / su_susfs set_priority_uid_filter).
+          # Idempotent: dilewati bila patch 11 sudah membawanya; berhenti jika titik sisipnya hilang.
+          # Supercall CMD_SUSFS_SET_PRIORITY_UID_FILTER (0x60030). Patch sisi KernelSU lama (midori01) belum memilikinya, sedangkan patch Jack
+          # sudah membawa susfs_set_priority_uid_filter() di kernel. Tanpa dispatch ini filter tidak pernah bisa dikonfigurasi
+          # (bitmap tetap kosong). Idempotent; berhenti jika titik sisipnya hilang.
+          python3 - <<'PYP'
+          p = 'KernelSU/kernel/supercall/supercall.c'
+          s = open(p, encoding='utf-8').read()
+          if 'CMD_SUSFS_SET_PRIORITY_UID_FILTER' in s:
+              print('supercall.c: dispatch priority-uid-filter sudah ada')
+          else:
+              a = '\t\tif (cmd == CMD_SUSFS_SHOW_ENABLED_FEATURES) {\n'
+              if s.count(a) != 1:
+                  raise SystemExit("::error::titik sisip CMD_SUSFS_SHOW_ENABLED_FEATURES di supercall.c tidak ditemukan/ganda (%d); dispatch SUSFS berubah" % s.count(a))
+              blk = ('#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n'
+                     '\t\tif (cmd == CMD_SUSFS_SET_PRIORITY_UID_FILTER) {\n'
+                     '\t\t\tsusfs_set_priority_uid_filter(arg);\n'
+                     '\t\t\treturn 0;\n'
+                     '\t\t}\n'
+                     '#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n')
+              open(p, 'w', encoding='utf-8').write(s.replace(a, blk + a, 1))
+              print('supercall.c: dispatch priority-uid-filter (0x60030) ditambahkan')
+          PYP
+          # Renew bitmap filter prioritas saat daftar paket berubah (setara hunk pkg_observer.c di patch KernelSU susfs4ksu
+          # upstream, commit aa61fe06). Tanpa ini, app yang dipasang/dihapus setelah filter diset tidak ikut tersaring
+          # sampai filter dikirim ulang. Di xxKSU perubahan paket ditangani throne_tracker_thread, yang menunggu
+          # packages.list stabil; panggilan diletakkan sesudah throne_tracker_fn() (hanya untuk prune_only == false).
+          python3 - <<'PYT'
+          p = 'KernelSU/kernel/manager/throne_tracker.c'
+          s = open(p, encoding='utf-8').read()
+          if 'susfs_parse_priority_app_strings' in s:
+              print('throne_tracker.c: renew priority filter sudah ada')
+          else:
+              a = '\tthrone_tracker_fn(prune_only);\n\n\tpr_info("throne_tracker: pid: %d exit!\\n", current->pid);'
+              if s.count(a) != 1:
+                  raise SystemExit("::error::titik sisip throne_tracker_thread di throne_tracker.c tidak ditemukan/ganda (%d); xxKSU berubah" % s.count(a))
+              ins = ('\tthrone_tracker_fn(prune_only);\n'
+                     '#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n'
+                     '\t// Renew the priority uid bitmap filter (packages.list is stable here)\n'
+                     '\tif (!prune_only)\n'
+                     '\t\tsusfs_parse_priority_app_strings();\n'
+                     '#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n'
+                     '\n\tpr_info("throne_tracker: pid: %d exit!\\n", current->pid);')
+              s = s.replace(a, ins, 1)
+              decl = ('#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n'
+                      'extern void susfs_parse_priority_app_strings(void);\n'
+                      '#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n\n')
+              k = 'static int throne_tracker_thread(void *data)'
+              if s.count(k) != 1:
+                  raise SystemExit("::error::throne_tracker_thread tidak ditemukan di throne_tracker.c")
+              s = s.replace(k, decl + k, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print('throne_tracker.c: renew priority filter ditambahkan')
+          PYT
+      - name: Selaraskan sisi KernelSU dengan SUSFS v2.4.0 (path loop, SID avc, sdcard monitor, dispatch)
+        if: ${{ env.SUSFS_ENABLE == 'true' }}
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          # Patch kernel v2.4.0 (Jack) mengubah kontrak dengan driver KernelSU. Patch sisi KernelSU (patch 11 xxKSU / midori01) bisa disusun untuk versi
+          # lebih lama, jadi tiap butir di bawah diperiksa dan hanya ditambah bila belum ada (idempotent):
+          #  1) susfs_run_sus_path_loop() sekarang static di fs/susfs.c; driver harus memicu lewat work item global susfs_extra_works
+          #     (schedule_work) bukan memanggil fungsinya langsung (kalau tidak: undefined reference / implicit declaration).
+          #  2) security/selinux/avc.c memakai u32 susfs_ksu_sid dan susfs_priv_app_sid (didefinisikan di sisi KernelSU).
+          #  3) susfs_start_sdcard_monitor_fn() harus dipanggil saat post-fs-data (monitor /sdcard/Android untuk flag decrypted).
+          #  4) supercall untuk perintah SUSFS yang ada di susfs_def.h (avc log spoofing, sus_map, show variant/version).
+          python3 - <<'PYC'
+          import re, os, sys, glob
+          root = 'KernelSU/kernel'
+          files = [f for f in glob.glob(root + '/**/*', recursive=True) if f.endswith(('.c', '.h'))]
+          def rd(p): return open(p, encoding='utf-8', errors='surrogateescape').read()
+          def wr(p, s): open(p, 'w', encoding='utf-8', errors='surrogateescape').write(s)
+          allsrc = {f: rd(f) for f in files}
+          def anywhere(pat):
+              r = re.compile(pat, re.M)
+              return [f for f, t in allsrc.items() if r.search(t)]
+
+          # 1) susfs_run_sus_path_loop() -> schedule_work(&susfs_extra_works)
+          callers = []
+          for f, t in allsrc.items():
+              for m in re.finditer(r'^[ \t]*susfs_run_sus_path_loop\(\)[ \t]*;[^\n]*$', t, re.M):
+                  callers.append(f)
+                  break
+          for f in callers:
+              t = allsrc[f]
+              t = re.sub(r'^([ \t]*)susfs_run_sus_path_loop\(\)[ \t]*;[^\n]*$', r'\1schedule_work(&susfs_extra_works);', t, flags=re.M)
+              if 'extern struct work_struct susfs_extra_works' not in t:
+                  inc = list(re.finditer(r'^#include[^\n]*\n', t, re.M))
+                  decl = '#ifdef CONFIG_KSU_SUSFS\n#include <linux/workqueue.h>\nextern struct work_struct susfs_extra_works;\n#endif\n'
+                  if inc:
+                      i = inc[-1].end(); t = t[:i] + decl + t[i:]
+                  else:
+                      t = decl + t
+              wr(f, t); allsrc[f] = t
+              print('susfs_run_sus_path_loop() -> schedule_work(&susfs_extra_works):', f)
+          # extern susfs_extra_works harus terlihat di satu-satunya unit kompilasi (xxKSU = unity build di ksu.c)
+          if not anywhere(r'schedule_work\(&susfs_extra_works\)'):
+              print('::warning::driver tidak memicu susfs_extra_works; add_sus_path_loop tidak dijalankan ulang setelah setresuid (sus_path biasa tetap jalan)')
+          if anywhere(r'(?<![\w_])susfs_run_sus_path_loop\('):
+              bad = anywhere(r'(?<![\w_])susfs_run_sus_path_loop\(')
+              sys.exit('::error::sisa pemanggilan susfs_run_sus_path_loop() di driver (static di v2.4.0): ' + ', '.join(bad))
+
+          # 2) SID untuk spoof avc
+          if not anywhere(r'^\s*(?:extern\s+)?u32\s+susfs_ksu_sid\b[^;(]*(?:=|;)') or not anywhere(r'^\s*u32\s+susfs_ksu_sid\b'):
+              sp = os.path.join(root, 'selinux/selinux.c'); t = rd(sp)
+              if 'susfs_ksu_sid' not in t:
+                  a = 'u32 ksu_file_sid __read_mostly = 0;\n'
+                  if t.count(a) != 1: sys.exit('::error::anchor ksu_file_sid di selinux.c tidak ditemukan')
+                  t = t.replace(a, a + '#ifdef CONFIG_KSU_SUSFS\nu32 susfs_ksu_sid __read_mostly = 0;\nu32 susfs_priv_app_sid __read_mostly = 0;\n#endif\n', 1)
+                  b = '\t\tpr_info("Cached ksu_file SID: %u\\n", ksu_file_sid);\n\t}\n'
+                  if t.count(b) != 1: sys.exit('::error::anchor cache ksu_file SID di selinux.c tidak ditemukan')
+                  add = ('#ifdef CONFIG_KSU_SUSFS\n'
+                         '\tif (security_secctx_to_secid(KERNEL_SU_CONTEXT, strlen(KERNEL_SU_CONTEXT), &susfs_ksu_sid))\n'
+                         '\t\tsusfs_ksu_sid = 0;\n'
+                         '\tif (security_secctx_to_secid("u:r:priv_app:s0:c512,c768", strlen("u:r:priv_app:s0:c512,c768"), &susfs_priv_app_sid))\n'
+                         '\t\tsusfs_priv_app_sid = 0;\n'
+                         '#endif\n')
+                  t = t.replace(b, b + add, 1)
+                  wr(sp, t); allsrc[sp] = t
+                  print('selinux.c: susfs_ksu_sid + susfs_priv_app_sid ditambahkan')
+          if not anywhere(r'u32\s+susfs_priv_app_sid\b'):
+              sys.exit('::error::susfs_priv_app_sid tidak terdefinisi di driver (avc.c v2.4.0 membutuhkannya)')
+
+          # 3) sdcard monitor saat post-fs-data
+          if not anywhere(r'susfs_start_sdcard_monitor_fn\s*\('):
+              bp = os.path.join(root, 'runtime/boot_event.c'); t = rd(bp)
+              a = '\tpr_info("on_post_fs_data!\\n");\n'
+              if t.count(a) != 1: sys.exit('::error::anchor on_post_fs_data di boot_event.c tidak ditemukan')
+              blk = ('#ifdef CONFIG_KSU_SUSFS\n'
+                     '\t{\n'
+                     '\t\textern void susfs_start_sdcard_monitor_fn(void);\n'
+                     '\t\tsusfs_start_sdcard_monitor_fn();\n'
+                     '\t}\n'
+                     '#endif // #ifdef CONFIG_KSU_SUSFS\n')
+              wr(bp, t.replace(a, a + blk, 1))
+              print('boot_event.c: susfs_start_sdcard_monitor_fn() dipanggil di on_post_fs_data')
+
+          # 4) dispatch supercall
+          sp = os.path.join(root, 'supercall/supercall.c'); t = rd(sp)
+          a = '\t\tif (cmd == CMD_SUSFS_SHOW_ENABLED_FEATURES) {\n'
+          table = [
+              ('CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING', 'susfs_set_avc_log_spoofing', None),
+              ('CMD_SUSFS_ADD_SUS_MAP', 'susfs_add_sus_map', 'CONFIG_KSU_SUSFS_SUS_MAP'),
+              ('CMD_SUSFS_SHOW_VARIANT', 'susfs_show_variant', None),
+              ('CMD_SUSFS_SHOW_VERSION', 'susfs_show_version', None),
+          ]
+          blk = ''
+          for cmd, fn, cfg in table:
+              if cmd in t:
+                  print('supercall.c: dispatch', cmd, 'sudah ada'); continue
+              body = '\t\tif (cmd == %s) {\n\t\t\t%s(arg);\n\t\t\treturn 0;\n\t\t}\n' % (cmd, fn)
+              if cfg: body = '#ifdef %s\n%s#endif // #ifdef %s\n' % (cfg, body, cfg)
+              blk += body
+              print('supercall.c: dispatch', cmd, 'ditambahkan')
+          if blk:
+              if t.count(a) != 1: sys.exit('::error::titik sisip CMD_SUSFS_SHOW_ENABLED_FEATURES tidak ditemukan/ganda (%d)' % t.count(a))
+              wr(sp, t.replace(a, blk + a, 1))
+          PYC
+          echo "== Cek akhir sisi KernelSU untuk v2.4.0 =="
+          grep -rn 'susfs_extra_works\|susfs_start_sdcard_monitor_fn\|susfs_ksu_sid\|susfs_priv_app_sid' KernelSU/kernel | head -20
+
+      - name: Verifikasi SELinux bersih (generation tracking + hook SUSFS)
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          D=drivers/kernelsu/selinux
+          [ -d "$D" ] || D=KernelSU/kernel/selinux
+          K="${D%/selinux}"
+          # 1) generation tracking (xxKSU 43aceaee / tiann #3964): seqno policy naik wajar seperti load policy asli, tidak statis 0
+          GT="$(grep -cE 'reset_avc_cache\((get_latest_granting_inc\(\)|pol->latest_granting)\)' "$D/rules.c")"
+          [ "$GT" -ge 2 ] \
+            || { echo "::error::rules.c belum memakai generation tracking di kedua jalur (apply_kernelsu_rules & handle_sepolicy): policy akan terlihat dirty"; exit 1; }
+          ! grep -q 'reset_avc_cache(0)' "$D/rules.c" || { echo "::error::masih ada reset_avc_cache(0) di rules.c"; exit 1; }
+          # 2) jalur seqno yang benar-benar dipakai di kernel 4.19 ini (selinux_state->ss->latest_granting atau simbol latest_granting)
+          if grep -q 'struct selinux_state ' security/selinux/include/security.h; then
+            echo "OK      kernel punya struct selinux_state: seqno lewat selinux_state.ss->latest_granting"
+            grep -q 'u32 latest_granting' security/selinux/ss/services.h \
+              || echo "::warning::'u32 latest_granting' tidak ditemukan di security/selinux/ss/services.h; kompilasi rules.c akan memberi tahu bila field-nya beda"
+          else
+            echo "::warning::kernel tanpa struct selinux_state: seqno lewat simbol global latest_granting (kallsyms); pastikan KALLSYMS_ALL=y"
+          fi
+          # 3) nama domain/file KernelSU "ksu"/"ksu_file" (bukan "su" yang umum dideteksi) + fitur selinux_hide ikut terbangun
+          grep -q '#define KERNEL_SU_DOMAIN "ksu"' "$D/selinux.h" \
+            || echo "::warning::KERNEL_SU_DOMAIN bukan \"ksu\" di selinux.h (cek apakah ini disengaja)"
+          if [ -f "$K/feature/selinux_hide.c" ] && grep -q 'ksu_selinux_hide_init();' "$K/ksu.c"; then
+            echo "OK      selinux_hide terpasang (sembunyikan type/rule KernelSU dari app uid >= 10000)"
+          else
+            echo "::warning::fitur selinux_hide tidak ditemukan di xxKSU ini (tag lama?)"
+          fi
+          # 4) hook SUSFS di sepolicy.c dan rules.c (hanya bila SUSFS aktif DAN sisi-KernelSU terpasang)
+          if [ "$SUSFS_ENABLE" = "true" ] && [ "${SUSFS_GLUE:-no}" != "no" ]; then
+            grep -q susfs_add_sus_type "$D/sepolicy.c" && grep -q susfs_add_sus_avd_allowed_by_type "$D/sepolicy.c" \
+              || { echo "::error::hook SUSFS di sepolicy.c tidak ada"; exit 1; }
+            grep -q susfs_set_batch_sid "$D/rules.c" || { echo "::error::susfs_set_batch_sid tidak dipanggil di rules.c"; exit 1; }
+          else
+            echo "SUSFS nonaktif / sisi-KernelSU tidak terpasang: pemeriksaan hook SUSFS dilewati"
+          fi
+          echo "::notice::SELinux clean: generation tracking OK (${GT} titik reset_avc_cache)"
+
+      - name: Samakan kode versi driver xxKSU dengan manager
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          # Di fork backslashxx angka versi DRIVER ditulis tangan penulis di kernel/Makefile (CFLAGS_ksu.o += -DKSU_VERSION=NNNNN),
+          # sedangkan angka versi MANAGER dihitung otomatis: versionCode = 30000 + jumlah commit - 95 (manager/build.gradle.kts).
+          # Karena itu keduanya bisa selisih 1 di rilis penulis sendiri (v3.3.1-25: driver 32704, manager 32705). Angka ini hanya tampilan;
+          # yang menentukan kecocokan driver<->manager adalah UAPI (di sini sama-sama 6).
+          # Flag per-file CFLAGS_ksu.o dipakai SETELAH ccflags-y, jadi angka diganti langsung di file driver.
+          # Dijalankan SETELAH patch SUSFS sisi KernelSU supaya konteks patch tidak bergeser.
+          MODE="${KSU_VERSION_MODE:-auto}"
+          GRADLE=KernelSU/manager/build.gradle.kts
+          MK=""
+          for f in KernelSU/kernel/Kbuild KernelSU/kernel/Makefile; do
+            if [ -f "$f" ] && grep -qE -- '-DKSU_VERSION=[0-9]+' "$f"; then MK="$f"; break; fi
+          done
+          echo "== Baris versi (SEBELUM) =="
+          grep -n 'KSU_VERSION' KernelSU/kernel/Kbuild KernelSU/kernel/Makefile 2>/dev/null || echo "(tidak ada)"
+          CUR=""
+          if [ -n "$MK" ]; then CUR="$(grep -oE -- '-DKSU_VERSION=[0-9]+' "$MK" | head -1 | grep -oE '[0-9]+$')"; fi
+          NEW=""
+          case "$MODE" in
+            official) NEW="$CUR"; echo "Mode official: versi driver bawaan penulis (${CUR:-tidak ada}) dipakai apa adanya" ;;
+            auto)
+              EXPR="$(grep -E 'return[[:space:]]+[0-9]+[[:space:]]*\+[[:space:]]*commitCount' "$GRADLE" 2>/dev/null | head -1 || true)"
+              if [ -z "$EXPR" ]; then
+                echo "::warning::Rumus versionCode manager tidak ditemukan di ${GRADLE}; versi driver dibiarkan (${CUR:-tidak ada})"; NEW="$CUR"
+              elif [ "$(git -C KernelSU rev-parse --is-shallow-repository)" = "true" ]; then
+                echo "::warning::Clone KernelSU dangkal (shallow), jumlah commit tidak valid; versi driver dibiarkan (${CUR:-tidak ada})"; NEW="$CUR"
+              else
+                BASE="$(printf '%s\n' "$EXPR" | sed -E 's/.*return[[:space:]]+([0-9]+).*/\1/')"
+                SUB="$(printf '%s\n' "$EXPR" | sed -n -E 's/.*commitCount[[:space:]]*-[[:space:]]*([0-9]+).*/\1/p')"
+                COUNT="$(git -C KernelSU rev-list --count HEAD)"
+                CALC=$((BASE + COUNT - ${SUB:-0}))
+                echo "Rumus manager: ${BASE} + commit(${COUNT}) - ${SUB:-0} = ${CALC}; versi driver bawaan: ${CUR:-tidak ada}"
+                NEW="$CUR"
+                if [ -z "$CUR" ]; then
+                  NEW="$CALC"
+                # Pagar pengaman: hasil hitungan harus sangat dekat dengan angka bawaan, kalau tidak jangan diubah.
+                elif [ "$CALC" -ge "$CUR" ] && [ "$((CALC - CUR))" -le 20 ]; then
+                  NEW="$CALC"
+                else
+                  echo "::warning::Hasil hitungan (${CALC}) terlalu jauh dari versi bawaan driver (${CUR}); versi driver dibiarkan"
+                fi
+              fi ;;
+            *[!0-9]*|"") echo "::error::input ksu_version_code harus auto, official, atau angka (diterima: '${MODE}')"; exit 1 ;;
+            *) NEW="$MODE" ;;
+          esac
+          if [ -z "$NEW" ]; then
+            echo "::warning::Kode versi driver tidak bisa ditentukan; dibiarkan bawaan tag"
+            echo "KSU_VERSION_FINAL=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ -n "$MK" ]; then
+            [ "$NEW" = "$CUR" ] || sed -i -E "s/(-DKSU_VERSION=)[0-9]+/\1${NEW}/g" "$MK"
+            TARGET="$MK"
+          else
+            # Cadangan: versi dihitung dinamis (bukan angka tetap), jadi flag lama dibuang lalu diganti lewat ccflags-y.
+            if [ -f KernelSU/kernel/Kbuild ]; then TARGET=KernelSU/kernel/Kbuild; else TARGET=KernelSU/kernel/Makefile; fi
+            printf '\nccflags-y := $(filter-out -DKSU_VERSION=%%,$(ccflags-y))\nccflags-y += -DKSU_VERSION=%s\n' "$NEW" >> "$TARGET"
+            echo "::warning::Tidak ada angka -DKSU_VERSION tetap di driver; memakai override ccflags-y di $TARGET"
+          fi
+          # Penanda untuk pemeriksaan build.log di akhir build
+          printf '\n$(info -- xxKSU version forced: %s (tag %s))\n' "$NEW" "$KSU_REF" >> "$TARGET"
+          echo "== Baris versi (SESUDAH) =="
+          grep -n 'KSU_VERSION' KernelSU/kernel/Kbuild KernelSU/kernel/Makefile 2>/dev/null || true
+          OTHER="$(grep -hoE -- '-DKSU_VERSION=[0-9]+' KernelSU/kernel/Kbuild KernelSU/kernel/Makefile 2>/dev/null | grep -vx -- "-DKSU_VERSION=${NEW}" || true)"
+          [ -z "$OTHER" ] || { echo "::error::Masih ada nilai -DKSU_VERSION lain di driver: ${OTHER}"; exit 1; }
+          echo "KSU_VERSION_FINAL=${NEW}" >> "$GITHUB_ENV"
+          echo "::notice::Kode versi driver xxKSU: ${CUR:-dinamis} -> ${NEW} (manager ${KSU_REF}; UAPI tidak berubah)"
+
+      - name: Cek kecocokan manager vs driver xxKSU
+        working-directory: kernel_source
+        run: |
+          set +e
+          echo "Sumber         : ${KSU_REPO} tag ${KSU_REF}, commit ${KSU_COMMIT:0:8}"
+          echo "Versi driver   : ${KSU_VERSION_FINAL:-bawaan tag} (mode ${KSU_VERSION_MODE}), UAPI ${KSU_EXPECT_UAPI}, mode hook ${KSU_HOOK_MODE}"
+          echo "Manager        : pasang APK ${KSU_REF} dari https://github.com/backslashxx/KernelSU/releases/tag/${KSU_REF//+/%2B}"
+          echo "Catatan        : APK manager lama (UAPI 5) tidak cocok dengan driver ini; profil root bisa ter-reset karena UAPI baru"
+          echo "NoMount        : kernel ${NOMOUNT_VERSION} butuh metamodule NoMount ${NOMOUNT_VERSION} (update bersamaan, lalu reboot)"
+          exit 0
+
+      - name: Setup SUSFS (patch kernel 4.19 v2.4.0)
+        if: env.SUSFS_ENABLE == 'true'
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+
+          # Patch diambil lewat git (di-pin ke commit), bukan URL raw.
+          rm -rf /tmp/susfs-src && mkdir -p /tmp/susfs-src
+          git -C /tmp/susfs-src init -q
+          git -C /tmp/susfs-src remote add origin "$SUSFS_PATCH_REPO"
+          git -C /tmp/susfs-src fetch -q --depth 1 origin "${SUSFS_PATCH_COMMIT:-HEAD}"
+          git -C /tmp/susfs-src checkout -q FETCH_HEAD
+          SUSFS_PATCH_COMMIT="$(git -C /tmp/susfs-src rev-parse HEAD)"
+          echo "SUSFS_PATCH_COMMIT=${SUSFS_PATCH_COMMIT}" >> "$GITHUB_ENV"
+          echo "== Commit patch Jack: ${SUSFS_PATCH_COMMIT} =="
+          PATCH_FILE="/tmp/susfs-src/${SUSFS_PATCH_PATH}"
+          test -s "$PATCH_FILE" || { echo "::error::patch SUSFS tidak ditemukan: ${SUSFS_PATCH_PATH}"; exit 1; }
+          grep -m1 'define SUSFS_VERSION' "$PATCH_FILE" || true
+          PATCH_SHA="$(sha256sum "$PATCH_FILE" | cut -d' ' -f1)"
+          echo "sha256 patch: ${PATCH_SHA}"
+          if [ -n "$SUSFS_PATCH_SHA256_EXPECT" ] && [ "$PATCH_SHA" != "$SUSFS_PATCH_SHA256_EXPECT" ]; then
+            echo "::warning::Patch Jack di HEAD berbeda dari patch v2.4.0 yang diuji (sha256 ${PATCH_SHA:0:12} vs ${SUSFS_PATCH_SHA256_EXPECT:0:12}); repo Jack berubah lagi, cek log hunk"
+          fi
+          grep -q 'define SUSFS_VERSION "v2.4' "$PATCH_FILE" \
+            || echo "::warning::Patch bukan v2.4.x; sisi KernelSU di bawah disusun untuk v2.4.0"
+          grep -q '^+++ b/fs/susfs.c' "$PATCH_FILE" \
+            || { echo "::error::bukan patch SUSFS kernel (fs/susfs.c tidak ada)"; exit 1; }
+
+          # Patch tidak boleh membawa hook inline ksu_handle_* (xxKSU memasang hook sendiri). Baris komentar diabaikan.
+          INLINE_HOOKS="$(grep -E '^\+' "$PATCH_FILE" | grep -vE '^\+[[:space:]]*(//|/\*|\*)' | grep -cE 'ksu_handle_' || true)"
+          if [ "${INLINE_HOOKS:-0}" -gt 0 ]; then
+            echo "::warning::patch SUSFS memuat ${INLINE_HOOKS} baris hook inline ksu_handle_*; bisa bentrok dengan mode hook ${KSU_HOOK_MODE}"
+          fi
+
+          # Gerbang: tanpa sisi SUSFS di driver, fs/susfs.c gagal di-link dan CONFIG_KSU_SUSFS* tidak pernah ada.
+          grep -rqs 'susfs_is_current_ksu_domain' KernelSU/kernel && grep -qs 'KSU_SUSFS' KernelSU/kernel/Kconfig \
+            || { echo "::error::Driver tidak membawa sisi SUSFS"; exit 1; }
+
+          # Tata letak driver KernelSU (diagnosis)
+          echo "== Referensi SUSFS di driver =="
+          grep -rln 'susfs' KernelSU/kernel 2>/dev/null | head -20 || echo "(tidak ada)"
+          echo "== Kconfig KSU_SUSFS =="
+          grep -n 'config KSU_SUSFS' KernelSU/kernel/Kconfig | head -30 || echo "(tidak ada)"
+
+          # Terapkan patch. Hunk yang gagal karena konteks include tree ini berbeda (cmdline.c, task_mmu.c, namespace.c, super.c) dibenahi di bawah.
+          patch -p1 -f -s --no-backup-if-mismatch < "$PATCH_FILE" > /tmp/susfs-apply.log 2>&1 || true
+          echo "== Hunk gagal (hunk sukses/offset/fuzz tidak dicetak lagi) =="
+          grep -E 'FAILED|Reversed|malformed|can.t find file' /tmp/susfs-apply.log || echo "(tidak ada)"
+          REJ="$(find . -name '*.rej' -not -path './out/*' | sort)"
+          if [ -n "$REJ" ]; then
+            echo "== File .rej =="; echo "$REJ"
+            OTHER="$(echo "$REJ" | grep -v -x -e './fs/proc/task_mmu.c.rej' -e './fs/proc/cmdline.c.rej' -e './fs/namespace.c.rej' -e './fs/super.c.rej' || true)"
+            # Tree ini bisa punya konteks fs/namespace.c & fs/super.c yang berbeda dari patch. Hanya hunk include/extern dan
+            # vfs_kern_mount() yang boleh gagal; keduanya dipasang ulang oleh fallback di bawah. Hunk lain = berhenti.
+            [ ! -f fs/namespace.c.rej ] || [ "$(grep -c '^@@' fs/namespace.c.rej)" -le 2 ] \
+              || OTHER="$OTHER ./fs/namespace.c.rej(>2 hunk)"
+            [ ! -f fs/super.c.rej ] || [ "$(grep -c '^@@' fs/super.c.rej)" -le 1 ] \
+              || OTHER="$OTHER ./fs/super.c.rej(>1 hunk)"
+            if [ -n "$OTHER" ]; then
+              for r in $REJ; do echo "----- $r"; cat "$r"; done
+              echo "::error::Ada hunk SUSFS gagal selain task_mmu.c / cmdline.c / (hunk include & vfs_kern_mount di namespace.c, include di super.c) (lihat .rej di atas)"
+              exit 1
+            fi
+          fi
+
+          python3 - <<'PY'
+          import os
+          def edit(path, fn):
+              s = open(path, encoding='utf-8').read()
+              n = fn(s)
+              if n != s:
+                  open(path, 'w', encoding='utf-8').write(n)
+                  print("diperbaiki:", path)
+              else:
+                  print("tidak perlu diubah:", path)
+
+          def need(s, anchor, path):
+              if anchor not in s:
+                  raise SystemExit("::error::anchor tidak ada di %s: %r" % (path, anchor))
+
+          # fs/proc/task_mmu.c: include susfs_def.h (hunk include gagal karena konteks berbeda)
+          def task_mmu(s):
+              if 'susfs_def.h' in s:
+                  return s
+              a = '#include <asm/elf.h>\n'
+              need(s, a, 'fs/proc/task_mmu.c')
+              blk = ('#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n'
+                     '#include <linux/susfs_def.h>\n'
+                     '#endif // #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)\n\n')
+              return s.replace(a, blk + a, 1)
+          edit('fs/proc/task_mmu.c', task_mmu)
+
+          # fs/proc/cmdline.c: spoof cmdline (hunk gagal karena tree ini punya blok INITRAMFS_IGNORE_SKIP_FLAG)
+          def cmdline(s):
+              if 'susfs_spoof_cmdline_or_bootconfig' in s:
+                  return s
+              a = 'static int cmdline_proc_show(struct seq_file *m, void *v)\n{\n'
+              need(s, a, 'fs/proc/cmdline.c')
+              decl = ('#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n'
+                      'extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;\n'
+                      'extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);\n'
+                      '#endif\n\n')
+              body = ('#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n'
+                      '\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {\n'
+                      '\t\tsusfs_spoof_cmdline_or_bootconfig(m);\n'
+                      '\t\tseq_putc(m, \'\\n\');\n'
+                      '\t\treturn 0;\n'
+                      '\t}\n'
+                      '#endif\n')
+              return s.replace(a, decl + a + body, 1)
+          edit('fs/proc/cmdline.c', cmdline)
+
+          # fs/stat.c memakai susfs_is_current_app_uid() dan STATX_SUS_KSTAT, tetapi tidak meng-include susfs_def.h
+          def stat_c(s):
+              if 'susfs_def.h' in s:
+                  return s
+              a = '#include <asm/unistd.h>\n'
+              need(s, a, 'fs/stat.c')
+              return s.replace(a, a + '#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n#include <linux/susfs_def.h>\n#endif\n', 1)
+          edit('fs/stat.c', stat_c)
+
+          # fs/notify/fdinfo.c: show_fdinfo() memanggil show(m, mark, f) untuk semua callback, jadi fanotify_fdinfo
+          # juga harus menerima argumen ketiga. (mount.h sudah di-include lewat fsnotify.h dan tidak punya include guard.)
+          def fdinfo_c(s):
+              if 'fanotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark, struct file *file)' in s:
+                  return s   # sudah dibawa patch Jack
+              old = 'static void fanotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark)\n{'
+              new = ('#if defined(CONFIG_KSU_SUSFS_SUS_MOUNT) || defined(CONFIG_KSU_SUSFS_SUS_KSTAT)\n'
+                     'static void fanotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark, struct file *file)\n'
+                     '#else\n'
+                     'static void fanotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark)\n'
+                     '#endif\n{')
+              need(s, old, 'fs/notify/fdinfo.c')
+              return s.replace(old, new, 1)
+          edit('fs/notify/fdinfo.c', fdinfo_c)
+
+          # fs/namespace.c: di branch 'back' hunk include/extern dan vfs_kern_mount() gagal karena konteks berbeda.
+          # Pasang ulang dengan anchor longgar (isi sama dengan hunk aslinya).
+          def namespace_c(s):
+              import re
+              inc = '#include "internal.h"\n'
+              if 'linux/susfs_def.h' not in s:
+                  need(s, inc, 'fs/namespace.c')
+                  s = s.replace(inc, inc + '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif // #ifdef CONFIG_KSU_SUSFS\n', 1)
+              if 'extern bool susfs_is_current_ksu_domain' not in s:
+                  a = '#endif // #ifdef CONFIG_KSU_SUSFS\n'
+                  i = s.index('linux/susfs_def.h')
+                  j = s.index(a, i) + len(a)
+                  s = s[:j] + ('\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                               'extern bool susfs_is_current_ksu_domain(void);\n'
+                               'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
+                               '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n') + s[j:]
+              if '#define CL_COPY_MNT_NS' not in s:
+                  a = '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                  i = s.index('extern bool susfs_is_current_ksu_domain')
+                  j = s.index(a, i)
+                  s = s[:j] + '#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n' + s[j:]
+              if 'bypass_orig_flow' not in s:
+                  m = re.search(r'^vfs_kern_mount\(', s, re.M)
+                  if not m:
+                      raise SystemExit("::error::vfs_kern_mount() tidak ditemukan di fs/namespace.c")
+                  m2 = re.compile(r'^\tmnt = alloc_vfsmnt\(([^;\n]*)\);\n', re.M).search(s, m.end(), m.end() + 2000)
+                  if not m2:
+                      print(s[m.start():m.start() + 1200])
+                      raise SystemExit("::error::anchor 'mnt = alloc_vfsmnt(...)' tidak ada di vfs_kern_mount() (lihat isi fungsi di atas)")
+                  pre = ('#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                         '\t// - We will just stop checking for ksu process if /sdcard/Android is accessible,\n'
+                         '\t//   for the sake of performance\n'
+                         '\tif (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted)) {\n'
+                         '\t\tif (susfs_is_current_ksu_domain()) {\n'
+                         '\t\t\tmnt = susfs_alloc_non_unshare_ksu_vfsmnt(name ?:"none");\n'
+                         '\t\t\tgoto bypass_orig_flow;\n'
+                         '\t\t}\n'
+                         '\t}\n'
+                         '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\n')
+                  post = ('\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                          'bypass_orig_flow:\n'
+                          '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n')
+                  s = s[:m2.start()] + pre + m2.group(0) + post + s[m2.end():]
+              return s
+          edit('fs/namespace.c', namespace_c)
+
+          # fs/super.c: hunk include/extern gagal di branch 'back'
+          def super_c(s):
+              inc = '#include "internal.h"\n'
+              if 'linux/susfs_def.h' in s and 'extern bool susfs_is_current_ksu_domain' in s:
+                  return s
+              need(s, inc, 'fs/super.c')
+              pre = '' if 'linux/susfs_def.h' in s else '#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif // #ifdef CONFIG_KSU_SUSFS\n'
+              post = '' if 'extern bool susfs_is_current_ksu_domain' in s else (
+                  '\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                  'extern bool susfs_is_current_ksu_domain(void);\n'
+                  'extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n'
+                  '#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n')
+              return s.replace(inc, pre + inc + post, 1)
+          edit('fs/super.c', super_c)
+
+          # fs/susfs.c: patch Jack membawa filter prioritas tetapi tidak mencantumkannya di susfs_get_enabled_features(),
+          # sehingga manager (BRENE) tidak menampilkan PRIORITY_UID_FILTER. Tambahkan entri sesudah blok fitur terakhir.
+          def features_c(s):
+              if 'CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER' in s:
+                  return s
+              i = s.find('void susfs_get_enabled_features(')
+              if i == -1:
+                  raise SystemExit("::error::susfs_get_enabled_features() tidak ada di fs/susfs.c")
+              a = '\n\tinfo->err = 0;\nout_copy_to_user:'
+              j = s.find(a, i)
+              if j == -1:
+                  raise SystemExit("::error::titik sisip 'info->err = 0; out_copy_to_user' tidak ada di susfs_get_enabled_features()")
+              blk = ('#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n'
+                     '\tinfo->err = copy_config_to_buf("CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\\n", buf_ptr, &copied_size, SUSFS_ENABLED_FEATURES_SIZE);\n'
+                     '\tif (info->err) goto out_copy_to_user;\n'
+                     '\tbuf_ptr = info->enabled_features + copied_size;\n'
+                     '#endif\n')
+              return s[:j] + '\n' + blk.rstrip('\n') + s[j:]
+          edit('fs/susfs.c', features_c)
+
+          # Meniru susfs4ksu upstream (simonpunk, commit aa61fe06 "Make priority_uid_filter as new feature"): hook di
+          # kernel/sys.c dan block/ioprio.c dijaga CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER, bukan CONFIG_KSU_SUSFS, sehingga
+          # fitur bisa dihidupkan/dimatikan saat kompilasi. Patch Jack belum mengikuti perubahan itu. Idempotent: dilewati
+          # jika patch sudah memakai guard baru. Hanya baris guard plain CONFIG_KSU_SUSFS yang diganti; guard lain
+          # (mis. CONFIG_KSU_SUSFS_SPOOF_UNAME di sys.c) tidak tersentuh karena dicocokkan sampai akhir baris.
+          def prio_gate(s):
+              if 'susfs_is_priority_uid_filtered' not in s or 'CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER' in s:
+                  return s
+              return (s.replace('#ifdef CONFIG_KSU_SUSFS\n', '#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n')
+                       .replace('#endif // #ifdef CONFIG_KSU_SUSFS\n', '#endif // #ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER\n'))
+          for _f in ('kernel/sys.c', 'block/ioprio.c', 'fs/ioprio.c'):
+              if os.path.exists(_f):
+                  edit(_f, prio_gate)
+
+          PY
+          find . -name '*.rej' -not -path './out/*' -delete
+
+          # susfs_is_priority_uid_filtered (getpriority uid filter / "hide_third_party_apps", CMD 0x60030):
+          # patch Jack >= 38bbbd5 (30 Okt 2026) membawanya NATIVE: definisi di fs/susfs.c, hook di kernel/sys.c
+          # (setpriority/getpriority) dan block/ioprio.c (ioprio_set/ioprio_get). Tidak ada hook manual dan tidak ada stub lagi.
+          # Bila SUSFS_PATCH_COMMIT diturunkan ke commit lama, pemeriksaan di bawah berhenti dengan pesan yang jelas.
+
+          test -f fs/susfs.c
+          test -f include/linux/susfs.h
+          test -f include/linux/susfs_def.h
+          grep -q 'susfs.o' fs/Makefile
+          grep -q 'susfs_def.h' fs/proc/task_mmu.c
+          grep -q 'susfs_spoof_cmdline_or_bootconfig' fs/proc/cmdline.c
+          grep -q 'bypass_orig_flow' fs/namespace.c
+          grep -q 'linux/susfs_def.h' fs/namespace.c
+          grep -q 'linux/susfs_def.h' fs/super.c
+          # Filter prioritas native dari patch Jack: definisi + 3 baris (1 extern + 2 pemakaian) di sys.c dan ioprio.
+          grep -qE '^bool susfs_is_priority_uid_filtered\(' fs/susfs.c \
+            || { echo "::error::fs/susfs.c tidak mendefinisikan susfs_is_priority_uid_filtered. SUSFS_PATCH_COMMIT (${SUSFS_PATCH_COMMIT}) lebih lama dari 38bbbd5 (30 Okt 2026); kosongkan pin atau naikkan."; exit 1; }
+          IOPRIO_F="$(git grep -l 'SYSCALL_DEFINE3(ioprio_set' -- '*.c' | head -1 || true)"
+          [ -n "$IOPRIO_F" ] || { echo "::error::SYSCALL_DEFINE3(ioprio_set,...) tidak ditemukan di tree ini"; exit 1; }
+          [ "$(grep -c 'susfs_is_priority_uid_filtered' kernel/sys.c)" -ge 3 ] \
+            || { echo "::error::hook priority-uid-filter di kernel/sys.c tidak dibawa patch (harusnya 1 extern + 2 pemakaian)"; grep -n 'susfs_is_priority_uid_filtered' kernel/sys.c; exit 1; }
+          [ "$(grep -c 'susfs_is_priority_uid_filtered' "$IOPRIO_F")" -ge 3 ] \
+            || { echo "::error::hook priority-uid-filter di ${IOPRIO_F} tidak dibawa patch (harusnya 1 extern + 2 pemakaian)"; grep -n 'susfs_is_priority_uid_filtered' "$IOPRIO_F"; exit 1; }
+          [ "$(grep -c 'CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER' kernel/sys.c)" -ge 6 ] \
+            && [ "$(grep -c 'CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER' "$IOPRIO_F")" -ge 6 ] \
+            || { echo "::error::guard CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER tidak terpasang lengkap di kernel/sys.c / ${IOPRIO_F}"; exit 1; }
+          echo "::notice::SUSFS kernel 4.19 v2.4.0 (patch Jack @ ${SUSFS_PATCH_COMMIT:0:8}) terpasang, termasuk filter prioritas native (sys.c, ${IOPRIO_F}, fs/susfs.c)"
+
+      - name: Sediakan kallsyms_on_each_symbol() (kernel/kallsyms.c, kernel 4.19)
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          # (Dari build whyred) Link error: "undefined symbol: kallsyms_on_each_symbol" (referenced by vmlinux.o:(try_kallsyms_on_each_symbol)).
+          # kernel/kallsyms.o ikut dikompilasi, jadi fungsi ini tidak aktif di tree ini (tidak ada, atau dibungkus #if yang tidak terpenuhi).
+          # Skrip memeriksa guard preprosesor di sekitar definisi; bila perlu, menambah definisi sendiri HANYA pada kondisi
+          # ketika definisi asli tidak aktif (jadi tidak pernah dobel). Hanya simbol inti kernel (sama dengan versi mainline tanpa modul).
+          python3 - <<'PY'
+          import re, sys
+          p = 'kernel/kallsyms.c'
+          s = open(p, encoding='utf-8').read()
+          for need in ('kallsyms_expand_symbol', 'kallsyms_sym_address', 'kallsyms_num_syms'):
+              if need not in s:
+                  sys.exit("::error::%s tidak ada di kernel/kallsyms.c, struktur berubah; kirim isi file ini" % need)
+          if 'KSU_COMPAT_KALLSYMS_ON_EACH_SYMBOL' in s:
+              print('sudah ditambahkan sebelumnya'); sys.exit(0)
+
+          # Hitung guard preprosesor aktif di titik definisi (kalau ada).
+          m = re.search(r'^(?:int|long)\s+kallsyms_on_each_symbol\s*\(', s, re.M)
+          guards = []
+          if m:
+              stack = []
+              for line in s[:m.start()].split('\n'):
+                  t = line.strip()
+                  if not t.startswith('#'): continue
+                  d = re.sub(r'^#\s*', '', t)
+                  if d.startswith('ifdef'):    stack.append('defined(%s)' % d.split()[1])
+                  elif d.startswith('ifndef'): stack.append('!defined(%s)' % d.split()[1])
+                  elif re.match(r'if\b', d):   stack.append('(%s)' % re.sub(r'/\*.*?\*/|//.*$', '', d[2:]).strip())
+                  elif d.startswith('elif') or d.startswith('else'):
+                      if stack: stack[-1] = '!(%s)' % stack[-1] if d.startswith('else') else '0'
+                  elif d.startswith('endif'):
+                      if stack: stack.pop()
+              guards = stack
+              print('Definisi asli ada di baris', s[:m.start()].count('\n') + 1, '| guard:', guards or '(tanpa guard)')
+              if not guards:
+                  # definisi asli aktif tanpa guard: tree sudah punya fungsinya, tidak ada yang perlu ditambahkan
+                  print('kallsyms_on_each_symbol() sudah terdefinisi tanpa guard di tree ini; tidak ada yang ditambahkan')
+                  sys.exit(0)
+          else:
+              print('Definisi asli tidak ada di kernel/kallsyms.c')
+
+          cond = ('#if !(%s)\n' % ' && '.join(guards)) if guards else ''
+          end  = '#endif /* guard asli */\n' if guards else ''
+          body = '''
+          /* KSU_COMPAT_KALLSYMS_ON_EACH_SYMBOL: backport untuk kernel 4.19 (dipakai driver KernelSU). Hanya simbol inti kernel. */
+          %sint kallsyms_on_each_symbol(int (*fn)(void *, const char *, struct module *, unsigned long), void *data)
+          {
+          \tchar namebuf[KSYM_NAME_LEN];
+          \tunsigned long i;
+          \tunsigned int off;
+          \tint ret;
+
+          \tfor (i = 0, off = 0; i < kallsyms_num_syms; i++) {
+          \t\toff = kallsyms_expand_symbol(off, namebuf, ARRAY_SIZE(namebuf));
+          \t\tret = fn(data, namebuf, NULL, kallsyms_sym_address(i));
+          \t\tif (ret != 0)
+          \t\t\treturn ret;
+          \t}
+          \treturn 0;
+          }
+          %s''' % (cond, end)
+          import textwrap
+          body = textwrap.dedent(body.replace('\n          ', '\n'))
+          open(p, 'w', encoding='utf-8').write(s.rstrip('\n') + '\n' + body)
+          print('kallsyms_on_each_symbol() ditambahkan di akhir', p)
+          PY
+          tail -30 kernel/kallsyms.c
+          grep -n 'kallsyms_on_each_symbol' include/linux/kallsyms.h || echo "(tidak dideklarasikan di kallsyms.h; driver mendeklarasikan sendiri)"
+
+      - name: Izinkan KALLSYMS_ALL tanpa DEBUG_KERNEL (init/Kconfig)
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          # Kconfig 4.19: KALLSYMS_ALL "depends on DEBUG_KERNEL && KALLSYMS". Mengaktifkan DEBUG_KERNEL mengubah
+          # banyak kode driver (qcacld-3.0: "incomplete type 'struct stack_trace'"), jadi cukup lepas dependensinya.
+          # Efeknya hanya memasukkan simbol data (sys_call_table) ke kallsyms, dibutuhkan xxKSU non-GKI (dan hook syscall_table); sama dengan build whyred.
+          python3 - <<'PY'
+          import re, sys
+          p = 'init/Kconfig'
+          s = open(p, encoding='utf-8').read()
+          m = re.search(r'(config KALLSYMS_ALL\n(?:[^\n]*\n)*?\s*depends on )DEBUG_KERNEL && KALLSYMS', s)
+          if not m:
+              i = s.find('config KALLSYMS_ALL')
+              print(s[i:i+400] if i >= 0 else 'config KALLSYMS_ALL tidak ada')
+              sys.exit('::error::blok KALLSYMS_ALL di init/Kconfig tidak sesuai dugaan')
+          s = s[:m.start()] + m.group(1) + 'KALLSYMS' + s[m.end():]
+          open(p, 'w', encoding='utf-8').write(s)
+          print('init/Kconfig: KALLSYMS_ALL tidak lagi butuh DEBUG_KERNEL')
+          PY
+          grep -n -A6 'config KALLSYMS_ALL' init/Kconfig
+
+      - name: Setup NoMount (v2.3.0-720)
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          # Script setup diambil dari tag yang sama dengan versi yang dipasang.
+          curl -fLSs --retry 3 -o /tmp/nomount-setup.sh \
+            "https://raw.githubusercontent.com/maxsteeel/nomount/${NOMOUNT_VERSION}/kernel/setup.sh" \
+            || { echo "::error::Gagal mengunduh kernel/setup.sh NoMount ${NOMOUNT_VERSION} (HTTP 404 = tag/path tidak ada)"; exit 1; }
+          sh /tmp/nomount-setup.sh "${NOMOUNT_VERSION}"
+
+          echo "== NoMount yang terpasang =="
+          git -C NoMount describe --tags --always
+
+          test -L fs/nomount
+          test -f fs/nomount/nomount.c
+          grep -q 'fs/nomount/Kconfig' fs/Kconfig
+          grep -q 'CONFIG_NOMOUNT' fs/Makefile
+
+      - name: Integrasikan fgetpriority (aerath-stuff, BUILT-IN, sama dengan whyred)
+        if: ${{ env.FGP_ENABLE == 'true' }}
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          rm -rf /tmp/fgp
+          git clone -q "$FGP_REPO" /tmp/fgp
+          if [ -n "$FGP_REF" ]; then
+            git -C /tmp/fgp checkout -q "$FGP_REF" \
+              || { echo "::error::fgetpriority_ref '${FGP_REF}' tidak ditemukan di ${FGP_REPO}"; exit 1; }
+          fi
+          FGP_COMMIT="$(git -C /tmp/fgp rev-parse HEAD)"
+          echo "FGP_COMMIT=${FGP_COMMIT}" >> "$GITHUB_ENV"
+          git -C /tmp/fgp log -1 --format='fgetpriority: %h %s'
+          grep -E '^version=' /tmp/fgp/module/module.prop || true
+          for f in main.c routine.h routine_kp.c routine_raw.c arch.h kernel.h arm64_branch_insn.h Makefile Kconfig; do
+            test -f "/tmp/fgp/kernel/$f" || { echo "::error::kernel/$f tidak ada di fgetpriority (struktur repo berubah)"; exit 1; }
+          done
+          rm -rf drivers/fgetpriority; mkdir -p drivers/fgetpriority
+          cp -a /tmp/fgp/kernel/. drivers/fgetpriority/
+          rm -f drivers/fgetpriority/Makefile.ddk drivers/fgetpriority/build_ddk.sh
+          # Built-in saja (kernel ini non-modul): ubah tristate/default m menjadi bool/default y
+          sed -i -E 's/^([[:space:]]*)tristate "uid filter"/\1bool "uid filter (getpriority hiding)"/; s/^([[:space:]]*)default m$/\1default y/' drivers/fgetpriority/Kconfig
+          grep -q 'bool "uid filter' drivers/fgetpriority/Kconfig || { echo "::error::Kconfig fgetpriority gagal diubah ke bool"; cat drivers/fgetpriority/Kconfig; exit 1; }
+          python3 - <<'PY'
+          import re
+          p = 'drivers/Kconfig'
+          s = open(p, encoding='utf-8').read()
+          line = 'source "drivers/fgetpriority/Kconfig"'
+          if line not in s:
+              i = s.rfind('\nendmenu')
+              assert i >= 0, 'endmenu tidak ada di drivers/Kconfig'
+              s = s[:i] + '\n' + line + s[i:]
+              open(p, 'w', encoding='utf-8').write(s)
+          PY
+          grep -q 'fgetpriority/' drivers/Makefile \
+            || printf '\nobj-$(CONFIG_FGETPRIORITY) += fgetpriority/\n' >> drivers/Makefile
+          grep -q 'drivers/fgetpriority/Kconfig' drivers/Kconfig
+          grep -q 'fgetpriority/' drivers/Makefile
+          # Hook memasang cabang baru di tempat find_user() dipanggil oleh sys_getpriority/setpriority/ioprio_*.
+          # find_user() harus tetap fungsi sendiri; LTO bisa meng-inline-nya sehingga titik panggil tidak ditemukan.
+          if grep -qE '^struct user_struct \*find_user\(kuid_t uid\)' kernel/user.c; then
+            sed -i -E 's/^struct user_struct \*find_user\(kuid_t uid\)/noinline struct user_struct *find_user(kuid_t uid)/' kernel/user.c
+            echo "::notice::find_user() ditandai noinline (kernel/user.c)"
+          else
+            grep -n 'find_user' kernel/user.c | head
+            echo "::warning::deklarasi find_user() tidak sesuai dugaan; noinline tidak ditambahkan"
+          fi
+          echo "::notice::fgetpriority ${FGP_COMMIT:0:8} terintegrasi (built-in)"
+
+      - name: Audit SELinux (enforcing bersih) & jejak sepolicy KernelSU
+        if: env.SELINUX_HARDEN == 'true'
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          echo "== Pola 'paksa permissive' di security/selinux (hanya informasi) =="
+          HACKS="$(git grep -nE 'selinux_enforcing[[:space:]]*=[[:space:]]*0[[:space:]]*;|selinux_state\.enforcing[[:space:]]*=[[:space:]]*0[[:space:]]*;|SECURITY_SELINUX_PERMISSIVE|selinux_permissive' -- security/selinux include/linux/selinux.h init 2>/dev/null || true)"
+          if [ -n "$HACKS" ]; then
+            echo "$HACKS"
+            echo "::warning::Ada baris yang tampak memaksa SELinux permissive di tree (lihat log). Periksa manual."
+          else
+            echo "(tidak ada)"
+          fi
+
+          echo "== Aturan sepolicy yang disuntikkan driver KernelSU =="
+          RULES="$(grep -rlE 'ksu_permissive|apply_kernelsu_rules' KernelSU --include='*.c' --include='*.h' 2>/dev/null || true)"
+          echo "File: ${RULES:-(tidak ditemukan)}"
+          if [ -n "$RULES" ]; then
+            echo "-- SEBELUM --"
+            grep -nE 'ksu_(permissive|type|typeattribute|attribute|allow|auditallow|dontaudit|transition|type_transition|genfscon|xperm)\b|KERNEL_SU_(DOMAIN|FILE)' $RULES | head -80 || true
+            if [ "$KSU_SEPOLICY_NO_PERMISSIVE" = "true" ]; then
+              perl -pi -e 's/^(\s*)(ksu_permissive\s*\([^;]*KERNEL_SU_DOMAIN[^;]*\)\s*;)/$1\/* enforcing-clean: $2 *\//' $RULES
+              N="$(grep -c 'enforcing-clean:' $RULES | awk -F: '{s+=$NF} END{print s+0}')"
+              echo "-- Pemanggilan ksu_permissive(KERNEL_SU_DOMAIN) yang dinonaktifkan: ${N} --"
+              if [ "$N" -eq 0 ]; then
+                echo "::notice::Tidak ada ksu_permissive(KERNEL_SU_DOMAIN) di driver ini; tidak ada yang diubah."
+              fi
+              grep -n 'ksu_permissive' $RULES | head -20 || true
+            fi
+          fi
+          echo "::notice::Domain/tipe KernelSU (mis. su, ksu_file) adalah bagian bawaan root; kernel tidak bisa menghilangkannya."
+
+      - name: Patch dts panel untuk MIUI/HyperOS
+        working-directory: kernel_source
+        run: |
+          # Disalin dari bagian "Building for MIUI" di build.sh tree ini.
+          D=arch/arm64/boot/dts/vendor/qcom
+          # u <pola> <file...>: hapus komentar "//" di depan pola (aktifkan kembali baris)
+          u() { p="$1"; shift; for f in "$@"; do sed -i "s|//${p}|${p}|g" "$D/$f"; done; }
+
+          # Dimensi panel
+          sed -i 's/<154>/<1537>/g' $D/dsi-panel-j1s* $D/dsi-panel-j2*
+          sed -i 's/<155>/<1544>/g' $D/dsi-panel-j3s-37-02-0a-dsc-video.dtsi
+          sed -i 's/<155>/<1545>/g' $D/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
+          sed -i 's/<155>/<1546>/g' $D/dsi-panel-k11a-38-08-0a-dsc-cmd.dtsi $D/dsi-panel-l11r-38-08-0a-dsc-cmd.dtsi
+          sed -i 's/<70>/<695>/g' $D/dsi-panel-j11-38-08-0a-fhd-cmd.dtsi $D/dsi-panel-j3s-37-02-0a-dsc-video.dtsi \
+                                  $D/dsi-panel-k11a-38-08-0a-dsc-cmd.dtsi $D/dsi-panel-l11r-38-08-0a-dsc-cmd.dtsi
+          sed -i 's/<71>/<710>/g' $D/dsi-panel-j1s* $D/dsi-panel-j2*
+
+          # Smart FPS dan qsync
+          sed -i 's|// mi,mdss-dsi-pan-enable-smart-fps|mi,mdss-dsi-pan-enable-smart-fps|g' $D/dsi-panel*
+          sed -i 's|// mi,mdss-dsi-smart-fps-max_framerate|mi,mdss-dsi-smart-fps-max_framerate|g' $D/dsi-panel*
+          sed -i 's|// qcom,mdss-dsi-pan-enable-smart-fps|qcom,mdss-dsi-pan-enable-smart-fps|g' $D/dsi-panel*
+          sed -i 's|qcom,mdss-dsi-qsync-min-refresh-rate|//qcom,mdss-dsi-qsync-min-refresh-rate|g' $D/dsi-panel*
+
+          # Refresh rate yang didukung MIUI
+          sed -i 's/120 90 60/120 90 60 50 30/g' $D/dsi-panel-g7a-36-02-0c-dsc-video.dtsi \
+                 $D/dsi-panel-g7a-37-02-0a-dsc-video.dtsi $D/dsi-panel-g7a-37-02-0b-dsc-video.dtsi
+          sed -i 's/144 120 90 60/144 120 90 60 50 48 30/g' $D/dsi-panel-j3s-37-02-0a-dsc-video.dtsi
+
+          # Kontrol brightness dari dtsi
+          u '39 00 00 00 00 00 03 51 03 FF' dsi-panel-j9-38-0a-0a-fhd-video.dtsi
+          u '39 00 00 00 00 00 03 51 0D FF' dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
+          u '39 00 00 00 00 00 05 51 0F 8F 00 00' dsi-panel-j1s-42-02-0a-dsc-cmd.dtsi \
+            dsi-panel-j1s-42-02-0a-mp-dsc-cmd.dtsi dsi-panel-j2-mp-42-02-0b-dsc-cmd.dtsi \
+            dsi-panel-j2-p2-1-42-02-0b-dsc-cmd.dtsi dsi-panel-j2s-mp-42-02-0a-dsc-cmd.dtsi
+          u '39 01 00 00 00 00 03 51 00 00' dsi-panel-j2-38-0c-0a-dsc-cmd.dtsi
+          u '39 01 00 00 00 00 03 51 03 FF' dsi-panel-j11-38-08-0a-fhd-cmd.dtsi dsi-panel-j9-38-0a-0a-fhd-video.dtsi
+          u '39 01 00 00 00 00 03 51 07 FF' dsi-panel-j1u-42-02-0b-dsc-cmd.dtsi \
+            dsi-panel-j2-42-02-0b-dsc-cmd.dtsi dsi-panel-j2-p1-42-02-0b-dsc-cmd.dtsi
+          u '39 01 00 00 00 00 03 51 0F FF' dsi-panel-j1u-42-02-0b-dsc-cmd.dtsi \
+            dsi-panel-j2-42-02-0b-dsc-cmd.dtsi dsi-panel-j2-p1-42-02-0b-dsc-cmd.dtsi
+          u '39 01 00 00 00 00 05 51 07 FF 00 00' dsi-panel-j1s-42-02-0a-dsc-cmd.dtsi \
+            dsi-panel-j1s-42-02-0a-mp-dsc-cmd.dtsi dsi-panel-j2-mp-42-02-0b-dsc-cmd.dtsi \
+            dsi-panel-j2-p2-1-42-02-0b-dsc-cmd.dtsi dsi-panel-j2s-mp-42-02-0a-dsc-cmd.dtsi
+          u '39 01 00 00 01 00 03 51 03 FF' dsi-panel-j11-38-08-0a-fhd-cmd.dtsi
+          u '39 01 00 00 11 00 03 51 03 FF' dsi-panel-j2-p2-1-38-0c-0a-dsc-cmd.dtsi
+
+          git status --short arch/arm64/boot/dts | head -20
+
+      - name: Perbaiki techpack audio saat DEBUG_FS aktif
+        if: env.DEBUG_FS_ON == 'true'
+        working-directory: kernel_source
+        run: |
+          set -eo pipefail
+          # Tree ini dibangun dengan DEBUG_FS mati (resep build.sh). Dengan CONFIG_DEBUG_FS=y, wcd-mbhc-v2.c memakai
+          # DEBUGFS_DIR_NAME dan DEBUGFS_HEADSET_STATUS_FILE_NAME yang tidak terdefinisi (error di build sebelumnya).
+          # Nama itu hanya label entri debugfs, jadi aman diberi nilai cadangan (#ifndef: tidak menimpa definisi yang sudah ada).
+          F=techpack/audio/asoc/codecs/wcd-mbhc-v2.c
+          test -f "$F" || { echo "::warning::$F tidak ada, dilewati"; exit 0; }
+          echo "== Definisi makro di techpack/audio (diagnosis) =="
+          grep -rn 'DEBUGFS_DIR_NAME\|DEBUGFS_HEADSET_STATUS_FILE_NAME' techpack/audio | head -10 || true
+          python3 - "$F" <<'PYF'
+          import re, sys
+          path = sys.argv[1]
+          s = open(path, encoding='utf-8', errors='surrogateescape').read()
+          if 'MBHC_DEBUGFS_FALLBACK' in s:
+              print("sudah diperbaiki:", path); sys.exit(0)
+          incs = list(re.finditer(r'^#include[^\n]*\n', s, flags=re.M))
+          if not incs:
+              raise SystemExit("::error::tidak ada #include di " + path)
+          pos = incs[-1].end()
+          blk = ('\n/* MBHC_DEBUGFS_FALLBACK: nilai cadangan saat CONFIG_DEBUG_FS=y */\n'
+                 '#ifndef DEBUGFS_DIR_NAME\n#define DEBUGFS_DIR_NAME "wcd_mbhc"\n#endif\n'
+                 '#ifndef DEBUGFS_HEADSET_STATUS_FILE_NAME\n#define DEBUGFS_HEADSET_STATUS_FILE_NAME "headset_status"\n#endif\n')
+          open(path, 'w', encoding='utf-8', errors='surrogateescape').write(s[:pos] + blk + s[pos:])
+          print("diperbaiki:", path)
+          PYF
+          grep -n 'MBHC_DEBUGFS_FALLBACK' "$F"
+
+      - name: Build kernel (MIUI/HyperOS)
+        working-directory: kernel_source
+        run: |
+          set -o pipefail
+
+          MAKE_ARGS="ARCH=arm64 SUBARCH=arm64 O=out CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
+
+          clang --version | head -1
+          make $MAKE_ARGS ${DEVICE}_defconfig 2>&1 | tee ../build.log
+
+          # --- Opsi MIUI (sama dengan build.sh tree ini) ---
+          scripts/config --file out/.config \
+            --set-str STATIC_USERMODEHELPER_PATH /system/bin/micd \
+            -e PERF_CRITICAL_RT_TASK -e SF_BINDER -e OVERLAY_FS -d DEBUG_FS \
+            -e MIGT -e MIGT_ENERGY_MODEL -e MIHW -e PACKAGE_RUNTIME_INFO \
+            -e BINDER_OPT -e KPERFEVENTS -e MILLET -e PERF_HUMANTASK \
+            -d LTO_CLANG -d LOCALVERSION_AUTO -e XIAOMI_MIUI -d MI_MEMORY_SYSFS \
+            -e TASK_DELAY_ACCT -e MIUI_ZRAM_MEMORY_TRACKING \
+            -d CONFIG_MODULE_SIG_SHA512 -d CONFIG_MODULE_SIG_HASH \
+            -e MI_FRAGMENTION -e PERF_HELPER -e BOOTUP_RECLAIM -e MI_RECLAIM -e RTMM
+
+          # --- Nama versi kernel ---
+          scripts/config --file out/.config --set-str LOCALVERSION "${KERNEL_LOCALVERSION}"
+
+          # --- Governor CPU default saat boot = schedutil (lihat catatan di env CPU_GOV_DEFAULT_SCHEDUTIL) ---
+          # "choice" di Kconfig: semua opsi CPU_FREQ_DEFAULT_GOV_* lain harus eksplisit dimatikan juga,
+          # scripts/config tidak tahu ini saling meniadakan.
+          if [ "$CPU_GOV_DEFAULT_SCHEDUTIL" = "true" ]; then
+            scripts/config --file out/.config \
+              -d CPU_FREQ_DEFAULT_GOV_PERFORMANCE -d CPU_FREQ_DEFAULT_GOV_POWERSAVE \
+              -d CPU_FREQ_DEFAULT_GOV_USERSPACE -d CPU_FREQ_DEFAULT_GOV_ONDEMAND \
+              -d CPU_FREQ_DEFAULT_GOV_CONSERVATIVE -e CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
+          fi
+
+          # --- Sama dengan v5, hanya IPC_LOGGING dimatikan + nama versi ---
+          # PSI dan low memory killer TIDAK disentuh (mengikuti defconfig bawaan tree).
+          # Fitur MIUI (MI_RECLAIM/RTMM/BOOTUP_RECLAIM/MILLET) tetap aktif seperti v5.
+          # Hanya IPC_LOGGING (log debug Qualcomm yang memakan RAM) yang dimatikan.
+          # Frekuensi, governor, dan tabel OPP CPU/GPU tidak disentuh sama sekali.
+          # (Opsi yang tidak ada di tree ini otomatis dibuang oleh olddefconfig.)
+          if [ "$IPC_LOGGING_OFF" = "true" ]; then
+            scripts/config --file out/.config -d IPC_LOGGING
+          else
+            scripts/config --file out/.config -e IPC_LOGGING
+          fi
+
+          # --- SELinux enforcing bersih (mengikuti konvensi GKI) ---
+          # Tanpa jalur "SELinux disabled" (selinux=0 / sysfs disable). DEVELOP tetap aktif agar init
+          # Android bisa mengatur mode; mode akhirnya enforcing dari init/policy, bukan dari kernel.
+          if [ "$SELINUX_HARDEN" = "true" ]; then
+            scripts/config --file out/.config \
+              -e SECURITY -e SECURITY_SELINUX -e SECURITY_SELINUX_DEVELOP \
+              -d SECURITY_SELINUX_BOOTPARAM -d SECURITY_SELINUX_DISABLE
+          fi
+
+          # --- Perbaikan jaringan: 5G + WiFi ---
+          if [ "$NET_TUNE" = "true" ]; then
+            # TCP_CONG_BBR berada di dalam menu TCP_CONG_ADVANCED; tanpa itu olddefconfig membuang BBR diam-diam
+            # (itulah sebabnya build sebelumnya tetap memakai cubic). DEFAULT_TCP_CONG / DEFAULT_NET_SCH adalah
+            # nilai turunan dari pilihan DEFAULT_*, jadi yang diset adalah pilihannya, bukan stringnya.
+            # Tree ini tidak punya pilihan default qdisc (DEFAULT_NET_SCH tidak ada), jadi qdisc default tidak bisa diubah lewat config.
+            scripts/config --file out/.config \
+              -e TCP_CONG_ADVANCED -e TCP_CONG_BBR \
+              -d DEFAULT_CUBIC -d DEFAULT_RENO -e DEFAULT_BBR \
+              -e NET_SCH_FQ -e NET_SCH_FQ_CODEL \
+              -d CFG80211_DEFAULT_PS \
+              -e NETFILTER_XT_TARGET_TCPMSS -e NETFILTER_XT_MATCH_OWNER -e NETFILTER_XT_MATCH_QUOTA2
+          fi
+
+          # --- xxKSU + NoMount ---
+          # Hook tree lama sudah dinonaktifkan di step Setup KernelSU (guard CONFIG_KSU dialihkan); hook dipasang driver.
+          ksu_has() { grep -qE "^[[:space:]]*config[[:space:]]+$1([[:space:]]|$)" drivers/kernelsu/Kconfig; }
+          echo "Mode hook: $KSU_HOOK_MODE"
+          scripts/config --file out/.config -e KSU -e KALLSYMS -e KALLSYMS_ALL -e NOMOUNT
+          # fgetpriority BUILT-IN (sama dengan build whyred): CONFIG_FGETPRIORITY=y, tanpa modul .ko.
+          if [ "$FGP_ENABLE" = "true" ]; then
+            scripts/config --file out/.config -e FGETPRIORITY
+          fi
+          # Hook sumber tree dimatikan, jadi hook lewat LSM milik driver wajib aktif bila simbolnya ada.
+          if ksu_has KSU_LSM_SECURITY_HOOKS; then
+            scripts/config --file out/.config -e KSU_LSM_SECURITY_HOOKS
+          else
+            echo "::notice::Kconfig xxKSU ${KSU_REF} tidak punya KSU_LSM_SECURITY_HOOKS (dilewati)"
+          fi
+          if [ "$KSU_HOOK_MODE" = "syscall_table" ]; then
+            HOOK_NOT=CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+            scripts/config --file out/.config -d KSU_HACK_ARM64_BRANCH_LINK -e KSU_TAMPER_SYSCALL_TABLE -e KALLSYMS_ALL
+          else
+            # BRANCH_LINK mensyaratkan KSU_TAMPER_SYSCALL_TABLE mati.
+            HOOK_NOT=CONFIG_KSU_TAMPER_SYSCALL_TABLE
+            scripts/config --file out/.config -d KSU_TAMPER_SYSCALL_TABLE -e KSU_HACK_ARM64_BRANCH_LINK
+          fi
+          # DEBUG_FS: opsi MIUI di atas mematikannya; dinyalakan lagi jika input debug_fs=true.
+          if [ "$DEBUG_FS_ON" = "true" ]; then
+            scripts/config --file out/.config -e DEBUG_FS
+            echo "DEBUG_FS dinyalakan (debug_fs=true)"
+          fi
+
+          # --- SUSFS ---
+          SUSFS_OPTS=""
+          if [ "$SUSFS_ENABLE" = "true" ]; then
+            scripts/config --file out/.config \
+              -e KSU_SUSFS -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT -e KSU_SUSFS_SUS_KSTAT \
+              -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+              -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e KSU_SUSFS_OPEN_REDIRECT -e KSU_SUSFS_SUS_MAP
+            if [ "$SUSFS_PRIORITY_UID_FILTER" = "true" ]; then
+              scripts/config --file out/.config -e KSU_SUSFS_PRIORITY_UID_FILTER
+            else
+              scripts/config --file out/.config -d KSU_SUSFS_PRIORITY_UID_FILTER
+            fi
+            SUSFS_OPTS="CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP"
+            [ "$SUSFS_PRIORITY_UID_FILTER" = "true" ] && SUSFS_OPTS="$SUSFS_OPTS CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER"
+            [ "$SUSFS_KERNEL_LOG" = "true" ] && SUSFS_OPTS="$SUSFS_OPTS CONFIG_KSU_SUSFS_ENABLE_LOG"
+            # TRY_UMOUNT sisi driver (supercall.c) memanggil susfs_add_try_umount(), yang TIDAK ada di patch
+            # kernel SUSFS v2.3.0 (error: implicit declaration). Umount sudah ditangani KernelSU lewat
+            # feature/kernel_umount.c, jadi opsi ini dimatikan. SUS_MEMFD juga dimatikan (tidak ada di patch ini).
+            scripts/config --file out/.config -d KSU_SUSFS_TRY_UMOUNT -d KSU_SUSFS_SUS_MEMFD
+            if [ "$SUSFS_KERNEL_LOG" = "true" ]; then
+              scripts/config --file out/.config -e KSU_SUSFS_ENABLE_LOG
+            else
+              scripts/config --file out/.config -d KSU_SUSFS_ENABLE_LOG
+            fi
+          fi
+
+          # --- Default MM (swappiness, lru_gen min_ttl, ZRAM lz4) ---
+          # v37: swappiness & min_ttl dibuat lebih moderat (lihat komentar di env MM_TUNE_*) supaya game
+          # tidak memicu reclaim/swap berlebihan saat working-set masih aktif dipakai -> mengurangi microstutter.
+          if [ "$MM_TUNE" = "true" ]; then
+            if grep -qE '^int vm_swappiness = [0-9]+;' mm/vmscan.c; then
+              sed -i -E "s/^int vm_swappiness = [0-9]+;/int vm_swappiness = ${MM_TUNE_SWAPPINESS};/" mm/vmscan.c
+              echo "OK      vm_swappiness default = ${MM_TUNE_SWAPPINESS}"
+            else
+              echo "::warning::pola 'int vm_swappiness = N;' tidak ditemukan di mm/vmscan.c, swappiness tidak diubah"
+            fi
+            if grep -qE 'lru_gen_min_ttl' mm/vmscan.c; then
+              sed -i -E "s/^(static unsigned long|static u64|unsigned long|u64)[[:space:]]+lru_gen_min_ttl[[:space:]]*(__read_mostly)?[[:space:]]*=[[:space:]]*[^;]+;/\1 lru_gen_min_ttl = ${MM_TUNE_LRU_GEN_MIN_TTL_MS};/" mm/vmscan.c
+              grep -n 'lru_gen_min_ttl' mm/vmscan.c | head -5 || true
+            else
+              echo "::notice::Tree ini tidak punya MGLRU (lru_gen_min_ttl tidak ada), bagian min_ttl dilewati"
+            fi
+          fi
+
+          make $MAKE_ARGS olddefconfig 2>&1 | tee -a ../build.log
+
+          # --- Pastikan simbol hook terpilih benar-benar aktif. Jika tidak, tampilkan Kconfig-nya + sisa konfigurasi KSU,
+          #     lalu coba penuhi "depends on" simbol itu secara otomatis (positif -> -e, negasi -> -d) dan olddefconfig ulang.
+          HOOK_SYM="$KSU_HOOK_SYM"
+          if [ -n "$HOOK_SYM" ] && ! grep -q "^CONFIG_${HOOK_SYM}=y" out/.config; then
+            echo "::warning::CONFIG_${HOOK_SYM} tidak aktif setelah olddefconfig; diagnosis + coba penuhi dependensinya"
+            echo "== KSU/KPROBES/KALLSYMS di defconfig tree =="
+            grep -nE 'KSU|KPROBES|KALLSYMS' "arch/arm64/configs/${DEVICE}_defconfig" || echo "(tidak ada)"
+            echo "== KSU/KPROBES/KALLSYMS di out/.config (SESUDAH olddefconfig) =="
+            grep -E '^(# )?CONFIG_(KSU|KPROBES|KALLSYMS|MODULES|HAVE_KPROBES)[A-Z0-9_]*[= ]' out/.config || true
+            python3 - "$HOOK_SYM" <<'PYDEP' > /tmp/ksu-dep-opts.txt
+          import re, sys
+          sym = sys.argv[1]
+          err = lambda *a: print(*a, file=sys.stderr)
+          lines = open('drivers/kernelsu/Kconfig', encoding='utf-8').read().split('\n')
+          idx = next((i for i, l in enumerate(lines) if re.match(r'^config\s+' + sym + r'\s*$', l)), None)
+          if idx is None:
+              err('simbol', sym, 'tidak ada di drivers/kernelsu/Kconfig'); sys.exit(0)
+          hdr = re.compile(r'^(config|menuconfig|choice|endchoice|menu|endmenu|if|endif|comment|source)\b')
+          c0 = None
+          for i in range(idx, -1, -1):
+              if lines[i].startswith('endchoice'): break
+              if lines[i].startswith('choice'): c0 = i; break
+          err('== Kconfig: blok', 'choice' if c0 is not None else 'config', 'yang memuat', sym, '==')
+          if c0 is not None:
+              c1 = next((i for i in range(idx, len(lines)) if lines[i].startswith('endchoice')), len(lines) - 1)
+              err('\n'.join(lines[c0:c1 + 1]))
+          else:
+              e = next((i for i in range(idx + 1, len(lines)) if hdr.match(lines[i])), len(lines))
+              err('\n'.join(lines[idx:e]))
+          # kumpulkan "depends on" milik simbol (dan header choice, jika ada)
+          deps = []
+          e = next((i for i in range(idx + 1, len(lines)) if hdr.match(lines[i])), len(lines))
+          scopes = [lines[idx + 1:e]]
+          if c0 is not None:
+              f = next((i for i in range(c0 + 1, len(lines)) if lines[i].startswith('config')), len(lines))
+              scopes.append(lines[c0 + 1:f])
+          for sc in scopes:
+              for l in sc:
+                  m = re.match(r'^\s*depends on\s+(.*)$', l)
+                  if m: deps.append(re.sub(r'\s+if\s+.*$', '', m.group(1)).strip())
+          opts = []
+          for ex in deps:
+              if '||' in ex or re.search(r'[=<>]', ex):
+                  err('dependensi tidak bisa diselesaikan otomatis:', ex); continue
+              for tok in ex.split('&&'):
+                  tok = tok.strip().strip('()').strip()
+                  neg = tok.startswith('!')
+                  name = tok.lstrip('!').strip().strip('()')
+                  if re.fullmatch(r'[A-Z0-9_]+', name) and name not in ('y', 'm', 'n', sym):
+                      opts += ['-d' if neg else '-e', name]
+          err('dependensi terdeteksi:', deps, '->', ' '.join(opts) or '(tidak ada)')
+          print(' '.join(opts))
+          PYDEP
+            DEP_OPTS="$(cat /tmp/ksu-dep-opts.txt)"
+            echo "== Opsi dependensi yang diterapkan: ${DEP_OPTS:-(tidak ada)} =="
+            if [ -n "$DEP_OPTS" ]; then
+              scripts/config --file out/.config $DEP_OPTS -e "$HOOK_SYM"
+              make $MAKE_ARGS olddefconfig 2>&1 | tee -a ../build.log
+            fi
+            if ! grep -q "^CONFIG_${HOOK_SYM}=y" out/.config; then
+              echo "== KSU di out/.config setelah percobaan ulang =="
+              grep -E '^(# )?CONFIG_(KSU|KPROBES|KALLSYMS|MODULES)[A-Z0-9_]*[= ]' out/.config || true
+              echo "::error::CONFIG_${HOOK_SYM} tetap tidak aktif. Kirim log ini (blok Kconfig + daftar KSU di atas) untuk diagnosis."
+              exit 1
+            fi
+            echo "OK      CONFIG_${HOOK_SYM}=y (setelah memenuhi dependensi)"
+          fi
+
+          # --- Tahap prepare (bounds.c, asm-offsets, vdso, dll) sekali saja, sebelum build penuh ---
+          # Jika error muncul di sini, penyebabnya toolchain/tree.
+          if ! make $MAKE_ARGS prepare > ../prepare.log 2>&1; then
+            echo "== prepare gagal; 60 baris terakhir prepare.log =="
+            tail -n 60 ../prepare.log
+            echo "::error::Tahap prepare gagal ; lihat prepare.log"
+            cat ../prepare.log >> ../build.log
+            exit 1
+          fi
+          echo "OK      make prepare"
+
+          # Diagnosis (tidak fatal): kode versi driver yang benar-benar dipakai compiler (semua nilai -DKSU_VERSION harus sama).
+          echo "== Flag -DKSU_VERSION efektif untuk drivers/kernelsu =="
+          KV_SEEN="$(make $MAKE_ARGS -n drivers/kernelsu/ 2>/dev/null | grep -o -- '-DKSU_VERSION=[0-9]*' | sort | uniq -c || true)"
+          echo "${KV_SEEN:-(tidak terlihat)}"
+          if [ -n "$KSU_VERSION_FINAL" ]; then
+            if [ -n "$KV_SEEN" ] && [ "$(printf '%s\n' "$KV_SEEN" | grep -vc -- "-DKSU_VERSION=${KSU_VERSION_FINAL}\$")" -eq 0 ]; then
+              echo "OK      versi driver = ${KSU_VERSION_FINAL}"
+            else
+              echo "::warning::Ada nilai -DKSU_VERSION selain ${KSU_VERSION_FINAL} di perintah kompilasi drivers/kernelsu (lihat daftar di atas); versi driver mungkin tidak sama dengan manager."
+            fi
+          fi
+
+          # Pastikan opsi benar-benar aktif (Kconfig membuang opsi yang tidak dikenal)
+          MISSING=0
+          for opt in CONFIG_KSU CONFIG_NOMOUNT CONFIG_KALLSYMS CONFIG_SECURITY_SELINUX CONFIG_XIAOMI_MIUI ${SUSFS_OPTS}; do
+            if grep -q "^${opt}=y" out/.config; then
+              echo "OK      ${opt}=y"
+            else
+              echo "MISSING ${opt}  (tidak aktif di out/.config)"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            echo "== Diagnosis: KSU/NOMOUNT di out/.config =="
+            grep -E '^(# )?CONFIG_(KSU|NOMOUNT|OVERLAY_FS|KPROBES|MODULES)[A-Z0-9_]*[= ]' out/.config || true
+            echo "== Kconfig KSU =="
+            sed -n '1,60p' drivers/kernelsu/Kconfig || true
+            echo "::error::Ada opsi kernel yang tidak aktif, lihat daftar MISSING di atas. Jika CONFIG_KSU hilang: periksa Kconfig xxKSU di log (drivers/kernelsu harus terpasang dan terdaftar di drivers/Kconfig)."
+            exit 1
+          fi
+          # Pastikan opsi hook KernelSU sesuai mode yang dipilih (keduanya saling meniadakan)
+          if [ "$DEBUG_FS_ON" = "true" ]; then
+            grep -q '^CONFIG_DEBUG_FS=y' out/.config \
+              && echo "OK      CONFIG_DEBUG_FS=y" \
+              || { echo "::error::debug_fs=true tetapi CONFIG_DEBUG_FS tidak aktif di out/.config"; exit 1; }
+          fi
+          WANT="CONFIG_${KSU_HOOK_SYM}"
+          if ! grep -q "^${WANT}=y" out/.config; then
+            echo "== KSU/KALLSYMS di out/.config =="; grep -E '^(# )?CONFIG_(KSU|KALLSYMS|KALLSYMS_ALL|MODULES|KPROBES)[A-Z0-9_]*[= ]' out/.config || true
+            echo "::error::${WANT} tidak aktif di out/.config (cek dependensi KSU/KALLSYMS/ARM64 di Kconfig xxKSU)"
+            exit 1
+          fi
+          if grep -q "^${HOOK_NOT}=y" out/.config; then
+            echo "::error::${HOOK_NOT} aktif bersamaan dengan mode ${KSU_HOOK_MODE}"
+            exit 1
+          fi
+          if [ "$KSU_HOOK_MODE" = "syscall_table" ] && ! grep -q '^CONFIG_KALLSYMS_ALL=y' out/.config; then
+            echo "::error::CONFIG_KALLSYMS_ALL tidak aktif (dibutuhkan mode syscall_table)"; exit 1
+          fi
+          if ksu_has KSU_LSM_SECURITY_HOOKS && ! grep -q '^CONFIG_KSU_LSM_SECURITY_HOOKS=y' out/.config; then
+            echo "::error::CONFIG_KSU_LSM_SECURITY_HOOKS tidak aktif di out/.config"; exit 1
+          fi
+          if [ "$SUSFS_ENABLE" = "true" ]; then
+            if ! grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
+              echo "::error::CONFIG_KSU_SUSFS tidak aktif di out/.config (Kconfig sisi KernelSU tidak mengenalnya atau dependensi KSU tidak terpenuhi)"
+              exit 1
+            fi
+            echo "== Opsi SUSFS di out/.config =="
+            grep -E '^CONFIG_KSU_SUSFS' out/.config || true
+            SUSFS_SUB="$(grep -cE '^CONFIG_KSU_SUSFS_[A-Z_]+=y' out/.config || true)"
+            echo "Sub-opsi SUSFS aktif: ${SUSFS_SUB} (10 = SUS_PATH, SUS_MOUNT, SUS_KSTAT, SPOOF_UNAME, ENABLE_LOG, HIDE_KSU_SUSFS_SYMBOLS, SPOOF_CMDLINE_OR_BOOTCONFIG, OPEN_REDIRECT, SUS_MAP, PRIORITY_UID_FILTER)"
+            if [ "$SUSFS_PRIORITY_UID_FILTER" = "true" ] && [ "$SUSFS_KERNEL_LOG" = "true" ] && [ "${SUSFS_SUB:-0}" -ne 10 ]; then
+              echo "::warning::Sub-opsi SUSFS aktif ${SUSFS_SUB}, diharapkan 10 (opsi bawaan lain seperti TRY_UMOUNT/SUS_MEMFD sengaja dimatikan)"
+            fi
+          fi
+          grep -E '^CONFIG_(KSU|KPROBES|KALLSYMS|SECCOMP)' out/.config || true
+          REQ_FGP="CONFIG_KALLSYMS_ALL"
+          [ "$FGP_ENABLE" = "true" ] && REQ_FGP="$REQ_FGP CONFIG_FGETPRIORITY"
+          for opt in $REQ_FGP; do
+            grep -q "^${opt}=y" out/.config && echo "OK      ${opt}=y" \
+              || { echo "::error::${opt} tidak aktif di out/.config (dibutuhkan xxKSU non-GKI / fgetpriority built-in)"; exit 1; }
+          done
+          if [ "$CPU_GOV_DEFAULT_SCHEDUTIL" = "true" ]; then
+            grep -q '^CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y' out/.config \
+              && echo "OK      CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y" \
+              || echo "::warning::CPU_GOV_DEFAULT_SCHEDUTIL: schedutil tidak jadi default governor di out/.config"
+          fi
+          echo "== SELinux & block layer di out/.config =="
+          grep -E '^(CONFIG_SECURITY_SELINUX[A-Z_]*=|# CONFIG_SECURITY_SELINUX[A-Z_]* is not set|CONFIG_DEFAULT_SECURITY|CONFIG_SCSI_MQ_DEFAULT=|CONFIG_MQ_IOSCHED_[A-Z_]*=|CONFIG_IOSCHED_[A-Z_]*=|CONFIG_DEFAULT_IOSCHED=|CONFIG_BLK_DEV_ZONED=)' out/.config || true
+          if [ "$SELINUX_HARDEN" = "true" ]; then
+            for opt in CONFIG_SECURITY_SELINUX CONFIG_SECURITY_SELINUX_DEVELOP; do
+              grep -q "^${opt}=y" out/.config || { echo "::error::${opt} tidak aktif"; exit 1; }
+            done
+            for opt in CONFIG_SECURITY_SELINUX_DISABLE CONFIG_SECURITY_SELINUX_BOOTPARAM; do
+              if grep -q "^${opt}=y" out/.config; then
+                echo "::error::${opt} masih aktif (harus mati agar SELinux tidak bisa dimatikan)"; exit 1
+              fi
+            done
+          fi
+          echo "== Opsi jaringan/WiFi (untuk dibandingkan dengan build lain) =="
+          grep -E '^CONFIG_(CFG80211|MAC80211|CNSS2|CNSS_QCA6390|QCA_CLD_WLAN|IPV6|NETFILTER_XT_TARGET_TCPMSS|NETFILTER_XT_MATCH_(OWNER|QUOTA2|BPF)|CGROUP_BPF|BPF_SYSCALL|INET_UDP_DIAG|TCP_CONG_[A-Z]+|DEFAULT_TCP_CONG|IPC_LOGGING|DEBUG_FS|MILLET|TCP_CONG_ADVANCED|CFG80211_DEFAULT_PS|ZRAM_DEF_COMP_[A-Z0-9]+|NET_SCH_FQ|DEFAULT_NET_SCH|DEFAULT_BBR|IPA3|RMNET|MHI_BUS|PCI_MSM)[A-Z0-9_]*[= ]' out/.config || true
+          if [ "$NET_TUNE" = "true" ]; then
+            for opt in CONFIG_TCP_CONG_BBR CONFIG_DEFAULT_BBR; do
+              grep -q "^${opt}=y" out/.config && echo "OK      ${opt}=y" \
+                || echo "::warning::NET_TUNE: ${opt} tidak aktif di out/.config (cek dependensi di net/ipv4/Kconfig / net/sched/Kconfig)"
+            done
+            grep -E '^CONFIG_DEFAULT_(TCP_CONG|NET_SCH)=' out/.config || true
+          fi
+          echo "== Status opsi memori/PSI & versi (hanya informasi, tidak diubah) =="
+          grep -E '^(CONFIG_LOCALVERSION=|CONFIG_PSI=|CONFIG_PSI_DEFAULT_DISABLED=|CONFIG_ANDROID_LOW_MEMORY_KILLER=|CONFIG_MILLET=|CONFIG_MI_RECLAIM=|CONFIG_RTMM=|CONFIG_BOOTUP_RECLAIM=)' out/.config || true
+          for opt in MI_RECLAIM RTMM BOOTUP_RECLAIM MILLET; do
+            grep -q "^CONFIG_${opt}=y" out/.config && echo "OK      CONFIG_${opt}=y" || echo "::warning::CONFIG_${opt} tidak aktif"
+          done
+          for opt in IPC_LOGGING; do
+            grep -q "^CONFIG_${opt}=y" out/.config && echo "MASIH AKTIF: CONFIG_${opt} (ditarik dependensi lain)" || echo "mati: CONFIG_${opt}"
+          done
+          # Hanya informasi (nama simbol display berbeda antar tree, jadi tidak dijadikan syarat)
+          echo "== Opsi display di out/.config =="
+          grep -E '^CONFIG_(DRM|MSM_SDE|MSM_DSI|DRM_MSM|FB_MSM|MSM_)[A-Z0-9_]*=' out/.config | head -40 || true
+
+          make $MAKE_ARGS -j"$(nproc)" 2>&1 | tee -a ../build.log
+          echo "== Info KernelSU di build ini =="
+          grep -E '^-- (KernelSU|KSU|xxKSU|SUSFS)' ../build.log | sort -u || true
+          if [ -n "$KSU_VERSION_FINAL" ]; then
+            grep -q "xxKSU version forced: ${KSU_VERSION_FINAL}" ../build.log \
+              || echo "::warning::Blok override versi xxKSU tidak tercatat di build.log (kode ${KSU_VERSION_FINAL})"
+          fi
+          if [ "$KSU_HOOK_MODE" = "syscall_table" ]; then
+            grep -E ' [A-Za-z] sys_call_table$' out/System.map \
+              || echo "::warning::sys_call_table tidak ada di System.map"
+          fi
+          echo "== Driver xxKSU / SUSFS ikut ter-link? =="
+          grep -cE ' [a-zA-Z] (ksu_|susfs_)' out/System.map || true
+          grep -E ' [a-zA-Z] (kernelsu_init|susfs_init)$' out/System.map || true
+
+          test -f out/arch/arm64/boot/Image
+          echo "Generating dtb..."
+          find out/arch/arm64/boot/dts -name '*.dtb' -exec cat {} + > out/arch/arm64/boot/dtb
+          ls -la out/arch/arm64/boot/Image out/arch/arm64/boot/dtb
+          strings out/arch/arm64/boot/Image | grep -m1 'Linux version' || true
+          REL="$(cat out/include/config/kernel.release)"
+          echo "kernel.release = $REL"
+          if [ "$REL" != "4.19.${KERNEL_SUBLEVEL}${KERNEL_LOCALVERSION}" ]; then
+            echo "::warning::Nama versi tidak sesuai target (4.19.${KERNEL_SUBLEVEL}${KERNEL_LOCALVERSION}), hasil: $REL"
+          fi
+
+      - name: Diagnosis xxKSU / SUSFS / fgetpriority (informasi, tidak menggagalkan build)
+        working-directory: kernel_source
+        run: |
+          set +e
+          echo "== Driver xxKSU ikut ter-link? (jumlah simbol ksu_ di System.map) =="
+          grep -cE ' [a-zA-Z] ksu_' out/System.map
+          echo "== Config terkait =="
+          grep -E '^(# )?CONFIG_(KSU|KALLSYMS|KALLSYMS_ALL|SECCOMP|SECURITY_SELINUX|NOMOUNT|FGETPRIORITY)[A-Z_]*[= ]' out/.config
+          echo "== SUSFS / fgetpriority ikut ter-link? =="
+          echo "simbol susfs_: $(grep -cE ' [a-zA-Z] susfs_' out/System.map)"
+          grep -E 'susfs_init|gphook_find_user|fgetpriority_init' out/System.map | head -6
+          echo "== Waktu build kernel (cocokkan dengan uname -v di HP untuk memastikan zip yang benar ter-flash) =="
+          strings out/arch/arm64/boot/Image* 2>/dev/null | grep -m1 'Linux version'
+          exit 0
+      - name: Ringkasan error (jika gagal)
+        if: failure()
+        run: |
+          test -f build.log || exit 0
+          echo "== 40 error pertama =="
+          grep -n -E 'error:|undefined symbol|\*\*\* ' build.log | head -40 || true
+          if grep -q -E "undefined (symbol|reference).*ksu_" build.log; then
+            echo "::error::Ada simbol ksu_* yang dipanggil kode tree tetapi tidak disediakan driver fork ini (hook sumber bawaan tree belum sepenuhnya dinonaktifkan)."
+          fi
+          if grep -q "cannot be used against symbol '__crc_" build.log; then
+            echo "::error::Simbol EXPORT gagal diberi versi oleh genksyms (cari 'version generation failed')."
+          fi
+          if grep -q -E "error:.*ksu|undefined (symbol|reference).*KSU" build.log; then
+            echo "::error::Ada error terkait KSU: periksa daftar sisa baris ksu_ di file tree pada step Setup KernelSU (guard hook lama harus sudah dialihkan)."
+          fi
+          grep -n "version generation failed" build.log | head -10 || true
+
+      - name: Package AnyKernel3
+        run: |
+          set -eo pipefail
+          # Fork AnyKernel3 milik tree ini (branch kona) membaca kernels/Image dan kernels/dtb.
+          # Zip tidak menyertakan dtbo.img; partisi dtbo stock tidak diganti.
+          git clone --depth=1 -b kona --single-branch https://github.com/liyafe1997/AnyKernel3 anykernel
+          rm -rf anykernel/kernels
+          mkdir -p anykernel/kernels
+          cp kernel_source/out/arch/arm64/boot/Image anykernel/kernels/
+          cp kernel_source/out/arch/arm64/boot/dtb anykernel/kernels/
+          cd anykernel
+
+          # --- Banner flash: nama kernel "by <akun GitHub>" dan nama perangkat (munch / POCO F4) ---
+          # Sebelumnya anykernel.sh bawaan fork TIDAK diubah, jadi banner memakai teks bawaan fork (nama pembuat lain, perangkat "aosp").
+          # Di sini properti anykernel.sh ditulis ulang: nilai yang sudah ada diganti, yang belum ada ditambahkan.
+          echo "== anykernel.sh bawaan fork (properti) =="
+          sed -n '1,40p' anykernel.sh
+          echo "== Baris yang menyebut aosp di anykernel.sh/banner (sebelum) =="
+          grep -inE 'aosp' anykernel.sh banner 2>/dev/null || echo "(tidak ada)"
+          AK_ACTOR="${{ github.actor }}" AK_KVER="${KERNEL_SUBLEVEL}${KERNEL_LOCALVERSION}" python3 - <<'PYAK'
+          import os, re, sys
+          p = 'anykernel.sh'
+          s = open(p, encoding='utf-8', errors='surrogateescape').read()
+          want = [
+              ('kernel.string', 'VORQEN Kernel 4.19.%s by %s' % (os.environ['AK_KVER'], os.environ['AK_ACTOR'])),
+              ('do.devicecheck', os.environ.get('AK_DEVICECHECK', '0')),
+              ('device.name1', 'munch'),
+              ('device.name2', 'POCO F4'),
+              ('device.name3', ''),
+              ('device.name4', ''),
+              ('device.name5', ''),
+          ]
+          m = re.search(r"(properties\(\)\s*\{\s*'\n)(.*?)(\n?'\s*;\s*\})", s, re.S)
+          if not m:
+              sys.exit('::error::blok properties() tidak ditemukan di anykernel.sh fork (format berubah); kirim isi file ini')
+          body = m.group(2)
+          for key, val in want:
+              pat = re.compile(r'^[ \t]*' + re.escape(key) + r'=.*$', re.M)
+              line = '%s=%s' % (key, val)
+              if pat.search(body):
+                  body = pat.sub(lambda _m: line, body, count=1)
+              else:
+                  body = body.rstrip('\n') + '\n' + line
+          s = s[:m.start(2)] + body + s[m.end(2):]
+          open(p, 'w', encoding='utf-8', errors='surrogateescape').write(s)
+          print('anykernel.sh: properti banner/perangkat diperbarui')
+          PYAK
+          # Teks "AOSP" yang tertulis langsung pada baris ui_print (banner bawaan fork) diganti; baris logika (variabel/if) tidak disentuh.
+          sed -i -E '/^[[:space:]]*ui_print[[:space:]]+["'"'"']/ s/AOSP/POCO F4 (munch) HyperOS/Ig' anykernel.sh
+          [ ! -f banner ] || sed -i -E 's/AOSP/POCO F4 (munch)/Ig' banner
+          echo "== anykernel.sh hasil (properti) =="
+          sed -n '1,40p' anykernel.sh
+          grep -q '^kernel.string=VORQEN Kernel .* by ' anykernel.sh || { echo "::error::kernel.string gagal diset di anykernel.sh"; exit 1; }
+          grep -q '^device.name1=munch$' anykernel.sh || { echo "::error::device.name1 gagal diset di anykernel.sh"; exit 1; }
+          zip -r9 ../VORQEN-POCO-F4-munch-HyperOS-${TOOLCHAIN}.zip ./* -x .git .gitignore out/ ./*.zip
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: VORQEN-POCO-F4-munch-HyperOS-${{ matrix.toolchain }}
+          path: VORQEN-POCO-F4-munch-HyperOS-${{ matrix.toolchain }}.zip
+          if-no-files-found: error
+
+      - name: Publish ke GitHub Release (unduh langsung, tanpa zip ganda)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="munch-hyperos-${TOOLCHAIN}-${{ github.run_number }}"
+          if [ "$TOOLCHAIN" = "zyc" ]; then TC_DESC="ZyCromerZ Clang 16.0.6 (${ZYC_TAG}); varian uji, kalau video/kamera crash pakai varian proton"; else TC_DESC="proton-clang 20210522"; fi
+          ASSETS=(VORQEN-POCO-F4-munch-HyperOS-${TOOLCHAIN}.zip)
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --prerelease \
+            --title "VORQEN POCO F4 munch HyperOS kernel (${TOOLCHAIN}) #${{ github.run_number }}" \
+            --notes "Kernel 4.19.352-vorqen (label kosmetik, source asli 4.19.325, varian MIUI/HyperOS) + xxKSU ${KSU_REF} @ ${KSU_COMMIT:0:8} (kode versi ${KSU_VERSION_FINAL:-bawaan tag}, UAPI ${KSU_EXPECT_UAPI}; hook ${KSU_HOOK_MODE}; SUSFS: ${SUSFS_ENABLE}; DEBUG_FS: ${DEBUG_FS_ON}; fgetpriority built-in: ${FGP_ENABLE} ${FGP_COMMIT:0:8}; SUSFS sisi-KernelSU: ${SUSFS_GLUE:-tidak}) + NoMount ${NOMOUNT_VERSION} built-in. Manager: APK dari https://github.com/backslashxx/KernelSU/releases/tag/${KSU_REF//+/%2B} ; pasang juga metamodule NoMount ${NOMOUNT_VERSION}. Toolchain: ${TC_DESC}. SELinux: tanpa jalur disabled, enforcing ditentukan init. Belum diuji di semua build HyperOS: backup boot stock sebelum flash."
+          echo "Release: https://github.com/${{ github.repository }}/releases/tag/$TAG"
+
+      - name: Upload build log (jika gagal)
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: build-log-${{ matrix.toolchain }}
+          path: |
+            build.log
+            prepare.log
+            kernel_source/out/.config
+            kernel_source/KernelSU/kernel/Kconfig
+            kernel_source/KernelSU/kernel/Kbuild
+            kernel_source/KernelSU/kernel/Makefile
+          include-hidden-files: true
+          if-no-files-found: ignore
