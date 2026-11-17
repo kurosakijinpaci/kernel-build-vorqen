@@ -1883,16 +1883,30 @@ jobs:
           # Teks "AOSP" yang tertulis langsung pada baris ui_print (banner bawaan fork) diganti; baris logika (variabel/if) tidak disentuh.
           sed -i -E '/^[[:space:]]*ui_print[[:space:]]+["'"'"']/ s/AOSP/POCO F4 (munch) HyperOS/Ig' anykernel.sh
           [ ! -f banner ] || sed -i -E 's/AOSP/POCO F4 (munch)/Ig' banner
-          # Label ROM di banner: fork memilih teks lewat ro.build.flavor (missi-* = "MIUI ROM", selain itu = "AOSP ROM"). Kernel ini varian
-          # HyperOS, jadi kedua label diganti "HyperOS ROM". Hanya os_string (teks tampilan); variabel os (logika) tidak disentuh.
-          sed -i -E 's/os_string="(AOSP|MIUI) ROM"/os_string="HyperOS ROM"/g' anykernel.sh
-          echo "== Label ROM di anykernel.sh (sesudah) =="
-          grep -n 'os_string=' anykernel.sh
+          # Label ROM di banner. Kernel ini HANYA varian MIUI/HyperOS (varian AOSP tidak dipakai: layar hitam di HyperOS).
+          # Fork memilih label lewat ro.build.flavor. Flavor HyperOS stock yang tidak ada di daftar case jatuh ke cabang cadangan
+          # `*) os="aosp"; os_string="AOSP ROM"`, sehingga banner menampilkan "AOSP ROM" padahal ROM-nya stock.
+          # HANYA teks os_string yang diganti menjadi "HyperOS ROM". Variabel logika os (aosp/miui/aospa) TIDAK diubah,
+          # jadi perilaku flash sama persis dengan zip sebelumnya; hanya tampilan banner yang berbeda.
+          # (Versi lama step ini gagal: pemeriksaan akhir mencari os_string="HyperOS" padahal hasilnya os_string="HyperOS ROM",
+          #  sehingga step exit 1 dan zip baru tidak pernah dibuat/diunggah.)
+          python3 - <<'PYOS'
+          import re, sys
+          p = 'anykernel.sh'
+          s = open(p, encoding='utf-8', errors='surrogateescape').read()
+          if not re.search(r'^[ \t]*\*\)[ \t]*os="[^"]*";[ \t]*os_string="[^"]*";;[ \t]*$', s, re.M):
+              sys.exit('::error::cabang cadangan *) os=...; os_string=...;; tidak ditemukan di anykernel.sh fork (format berubah)')
+          s = re.sub(r'os_string="(AOSP|MIUI) ROM"', 'os_string="HyperOS ROM"', s)
+          open(p, 'w', encoding='utf-8', errors='surrogateescape').write(s)
+          print('anykernel.sh: label ROM diganti menjadi HyperOS ROM (variabel os tidak diubah)')
+          PYOS
+          echo "== Deteksi ROM di anykernel.sh (sesudah) =="
+          grep -nE 'os=|os_string=' anykernel.sh
           if grep -qE 'os_string="(AOSP|MIUI) ROM"' anykernel.sh; then echo "::error::label AOSP/MIUI ROM masih ada di anykernel.sh"; exit 1; fi
-          # Label ROM pada banner: cabang cadangan fork `*) os="aosp"; os_string="AOSP ROM";;` (dipakai bila ro.build.flavor bukan MIUI/Paranoid)
-          # hanya label tampilan. Nilai os="aosp" (logika fork) tidak diubah, hanya teks yang tampil menjadi HyperOS.
-          sed -i -E 's/(os_string=")AOSP ROM(")/\1HyperOS\2/' anykernel.sh
-          grep -q 'os_string="HyperOS"' anykernel.sh || { echo "::error::label ROM cadangan (AOSP ROM) gagal diganti menjadi HyperOS; cek anykernel.sh fork"; grep -n 'os_string' anykernel.sh; exit 1; }
+          grep -qE '^[[:space:]]*\*\) os="[^"]*"; os_string="HyperOS ROM";;' anykernel.sh \
+            || { echo "::error::label cabang cadangan gagal diganti menjadi HyperOS ROM; cek anykernel.sh fork"; grep -n 'os_string' anykernel.sh; exit 1; }
+          echo "== anykernel.sh baris 40-140 (diagnosis: cara variabel os dipakai selanjutnya) =="
+          sed -n '40,140p' anykernel.sh
           echo "== anykernel.sh hasil (properti) =="
           sed -n '1,40p' anykernel.sh
           grep -q '^kernel.string=VORQEN Kernel .* by ' anykernel.sh || { echo "::error::kernel.string gagal diset di anykernel.sh"; exit 1; }
