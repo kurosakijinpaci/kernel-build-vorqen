@@ -438,7 +438,7 @@ jobs:
           echo "== Sisa referensi KSU di file tree (SESUDAH, di luar guard yang dialihkan) =="
           git grep -nE 'CONFIG_KSU\b|ksu_' -- '*.c' '*.h' | grep -v 'CONFIG_KSU_TREE_HOOK_DISABLED' | head -60 || true
 
-          echo "::notice::xxKSU ${KSU_REF} @ ${KSU_COMMIT:0:8}, mode hook: ${KSU_HOOK_MODE}"
+          echo "::notice::xxKSU ${KSU_REF} @ ${KSU_COMMIT_NOW:0:8}, mode hook: ${KSU_HOOK_MODE}"
 
       - name: SELinux terbaru dari master xxKSU (kernel/selinux + selinux_hide, sama dengan whyred)
         working-directory: kernel_source
@@ -1806,6 +1806,13 @@ jobs:
           echo "== SUSFS / fgetpriority ikut ter-link? =="
           echo "simbol susfs_: $(grep -cE ' [a-zA-Z] susfs_' out/System.map)"
           grep -E 'susfs_init|gphook_find_user|fgetpriority_init' out/System.map | head -6
+          echo "== Warning compiler: total dan 15 berkas terbanyak =="
+          grep -c 'warning:' ../build.log
+          grep -oE '^[^ :]+\.[ch]:[0-9]+:[0-9]+: warning' ../build.log | cut -d: -f1 | sort | uniq -c | sort -rn | head -15
+          echo "== Warning compiler pada kode SUSFS / xxKSU / NoMount / fgetpriority (unik) =="
+          grep -E 'warning:' ../build.log | grep -iE 'susfs|kernelsu|/ksu|nomount|fgetpriority|sus_|ksu_' | sort -u | head -40 || true
+          echo "== Warning/peringatan lain di build.log (non-compiler) =="
+          grep -E '^(WARNING|Warning)[: ]|::warning::' ../build.log | sort -u | head -20 || true
           echo "== Waktu build kernel (cocokkan dengan uname -v di HP untuk memastikan zip yang benar ter-flash) =="
           strings out/arch/arm64/boot/Image* 2>/dev/null | grep -m1 'Linux version'
           exit 0
@@ -1876,6 +1883,16 @@ jobs:
           # Teks "AOSP" yang tertulis langsung pada baris ui_print (banner bawaan fork) diganti; baris logika (variabel/if) tidak disentuh.
           sed -i -E '/^[[:space:]]*ui_print[[:space:]]+["'"'"']/ s/AOSP/POCO F4 (munch) HyperOS/Ig' anykernel.sh
           [ ! -f banner ] || sed -i -E 's/AOSP/POCO F4 (munch)/Ig' banner
+          # Label ROM di banner: fork memilih teks lewat ro.build.flavor (missi-* = "MIUI ROM", selain itu = "AOSP ROM"). Kernel ini varian
+          # HyperOS, jadi kedua label diganti "HyperOS ROM". Hanya os_string (teks tampilan); variabel os (logika) tidak disentuh.
+          sed -i -E 's/os_string="(AOSP|MIUI) ROM"/os_string="HyperOS ROM"/g' anykernel.sh
+          echo "== Label ROM di anykernel.sh (sesudah) =="
+          grep -n 'os_string=' anykernel.sh
+          if grep -qE 'os_string="(AOSP|MIUI) ROM"' anykernel.sh; then echo "::error::label AOSP/MIUI ROM masih ada di anykernel.sh"; exit 1; fi
+          # Label ROM pada banner: cabang cadangan fork `*) os="aosp"; os_string="AOSP ROM";;` (dipakai bila ro.build.flavor bukan MIUI/Paranoid)
+          # hanya label tampilan. Nilai os="aosp" (logika fork) tidak diubah, hanya teks yang tampil menjadi HyperOS.
+          sed -i -E 's/(os_string=")AOSP ROM(")/\1HyperOS\2/' anykernel.sh
+          grep -q 'os_string="HyperOS"' anykernel.sh || { echo "::error::label ROM cadangan (AOSP ROM) gagal diganti menjadi HyperOS; cek anykernel.sh fork"; grep -n 'os_string' anykernel.sh; exit 1; }
           echo "== anykernel.sh hasil (properti) =="
           sed -n '1,40p' anykernel.sh
           grep -q '^kernel.string=VORQEN Kernel .* by ' anykernel.sh || { echo "::error::kernel.string gagal diset di anykernel.sh"; exit 1; }
